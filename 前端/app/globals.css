@@ -1,0 +1,373 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: var(--font-geist-sans), 'Geist Fallback', system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), 'Geist Mono Fallback';
+  --font-display: var(--font-display-family);
+  --font-editorial: var(--font-editorial-family);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-chip-morning: var(--chip-morning);
+  --color-chip-morning-fg: var(--chip-morning-fg);
+  --color-chip-afternoon: var(--chip-afternoon);
+  --color-chip-afternoon-fg: var(--chip-afternoon-fg);
+  --color-chip-evening: var(--chip-evening);
+  --color-chip-evening-fg: var(--chip-evening-fg);
+
+  --color-accent-strong: var(--accent-strong);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.4);
+}
+
+:root {
+  color-scheme: light;
+
+  /* 与主界面一致的旅行纸张配色：暖米白 + 深海蓝 + 湖青 + 珊瑚 */
+  --background: #f6f1e8;
+  --foreground: #092d43;
+
+  --card: #fffaf2;
+  --card-foreground: #092d43;
+
+  --popover: #fffaf2;
+  --popover-foreground: #092d43;
+
+  --primary: #078fab;
+  --primary-foreground: #ffffff;
+
+  --secondary: #dceef2;
+  --secondary-foreground: #214b5d;
+
+  --muted: #ebe6dc;
+  --muted-foreground: #617684;
+
+  --accent: #e87955;
+  --accent-foreground: #ffffff;
+  --accent-strong: #bf5436;
+
+  --destructive: #c94e3f;
+
+  --border: #ced8d7;
+  --input: #d9e1df;
+  --ring: #078fab;
+
+  --font-display-family: var(--font-display-sc), 'FZLanTingHeiS-DB-GB', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
+  --font-editorial-family: var(--font-editorial-sc), 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', STSong, serif;
+
+  /* 雷达图 5 维配色 */
+  --chart-1: oklch(0.62 0.108 218);
+  --chart-2: oklch(0.7 0.12 165);
+  --chart-3: oklch(0.74 0.13 42);
+  --chart-4: oklch(0.66 0.11 280);
+  --chart-5: oklch(0.72 0.12 95);
+
+  /* 行程时段标签配色 */
+  --chip-morning: oklch(0.93 0.05 95);
+  --chip-morning-fg: oklch(0.45 0.09 80);
+  --chip-afternoon: oklch(0.92 0.04 218);
+  --chip-afternoon-fg: oklch(0.42 0.09 230);
+  --chip-evening: oklch(0.92 0.04 280);
+  --chip-evening-fg: oklch(0.44 0.09 285);
+
+  --radius: 0.9rem;
+
+  /* 统一交互节奏：快速响应、柔和到位，不使用无缘由的回弹。 */
+  --motion-press: 110ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --motion-ui: 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-route: 180ms ease-out;
+  --shadow-surface: 0 14px 32px -24px rgb(6 45 72 / 0.62);
+  --shadow-floating: 0 22px 54px -24px rgb(6 45 72 / 0.62);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+  html {
+    @apply font-sans;
+  }
+  button,
+  [role='button'] {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+/* ---------- 共享交互与材质 ---------- */
+.ui-pressable,
+.ui-icon-button,
+button:not(:disabled),
+[role='button'] {
+  transform-origin: center;
+  transition:
+    transform var(--motion-press),
+    filter var(--motion-ui),
+    background-color var(--motion-ui),
+    border-color var(--motion-ui),
+    box-shadow var(--motion-ui),
+    color var(--motion-ui),
+    opacity var(--motion-ui);
+}
+
+.ui-icon-button {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
+
+button:not(:disabled):active,
+[role='button']:active,
+.ui-pressable:not(:disabled):active,
+.ui-icon-button:not(:disabled):active {
+  filter: saturate(1.04) brightness(0.98);
+  transform: scale(0.965);
+  transition-duration: 80ms;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  button:not(:disabled):hover,
+  [role='button']:hover {
+    filter: saturate(1.025) brightness(1.015);
+  }
+}
+
+.top-bar::after {
+  position: absolute;
+  right: 0;
+  bottom: -10px;
+  left: 0;
+  height: 10px;
+  content: '';
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgb(6 45 72 / 0.12), transparent);
+  opacity: 0.7;
+}
+
+.route-page {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  isolation: isolate;
+  animation: route-enter var(--motion-route) both;
+}
+
+.ui-material-in {
+  transform-origin: top right;
+  animation: materialize-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.ui-toast-in {
+  animation: toast-enter 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes route-enter {
+  from { opacity: 0.84; }
+  to { opacity: 1; }
+}
+
+@keyframes materialize-in {
+  from { opacity: 0; filter: blur(5px); transform: translateY(-4px) scale(0.96); }
+  to { opacity: 1; filter: blur(0); transform: translateY(0) scale(1); }
+}
+
+@keyframes toast-enter {
+  from { opacity: 0; filter: blur(4px); transform: translateY(-10px) scale(0.985); }
+  to { opacity: 1; filter: blur(0); transform: translateY(0) scale(1); }
+}
+
+/* ---------- 自定义动效 ---------- */
+@keyframes planet-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes float-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+@keyframes stardust {
+  0% {
+    opacity: 0.2;
+    transform: translateY(0) scale(0.8);
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.2;
+    transform: translateY(-14px) scale(1.1);
+  }
+}
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+@keyframes orbit-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale(1.04);
+  }
+}
+@keyframes comet {
+  0% {
+    transform: rotate(0deg) translateX(54px) rotate(0deg);
+    opacity: 0.2;
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(360deg) translateX(54px) rotate(-360deg);
+    opacity: 0.2;
+  }
+}
+
+.animate-planet-spin {
+  animation: planet-spin 18s linear infinite;
+}
+.animate-float-soft {
+  animation: float-soft 5s ease-in-out infinite;
+}
+.animate-stardust {
+  animation: stardust 2.4s ease-in-out infinite;
+}
+.animate-orbit-pulse {
+  animation: orbit-pulse 2.8s ease-in-out infinite;
+}
+.animate-comet {
+  animation: comet 2.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+/* 骨架屏微光 */
+.skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--card) 70%, white),
+    transparent
+  );
+  animation: shimmer 1.6s infinite;
+}
+
+/* 隐藏滚动条但保留滚动 */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-planet-spin,
+  .animate-float-soft,
+  .animate-stardust,
+  .animate-orbit-pulse,
+  .animate-comet,
+  .skeleton-shimmer::after {
+    animation: none !important;
+  }
+
+  .route-page,
+  .ui-material-in,
+  .ui-toast-in {
+    animation: reduced-fade 160ms ease-out both !important;
+  }
+
+  button:not(:disabled):active,
+  [role='button']:active,
+  .ui-pressable:not(:disabled):active,
+  .ui-icon-button:not(:disabled):active {
+    filter: brightness(0.97);
+    transform: none;
+  }
+}
+
+@keyframes reduced-fade {
+  from { opacity: 0.72; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .top-bar,
+  .ui-material-in,
+  .ui-toast-in,
+  .app-loading-overlay {
+    background-color: var(--card) !important;
+    backdrop-filter: none !important;
+  }
+
+  .top-bar { color: var(--foreground) !important; }
+  .top-bar h1,
+  .top-bar button { color: var(--foreground) !important; }
+  .top-bar button { background-color: var(--secondary) !important; }
+}
+
+@media (prefers-contrast: more) {
+  .top-bar,
+  .ui-material-in,
+  .ui-toast-in {
+    border-color: currentColor !important;
+    box-shadow: none !important;
+  }
+}
