@@ -3,8 +3,8 @@
 Defines the OpenAI-compatible `tools` schema exposed to the model during
 `/api/ai/planning`, plus a per-external-tool Pydantic argument schema used by
 `travel_fact_service.execute_tool` before any provider runs. External calls map
-strictly to the provider whitelist; the internal `update_planning_fact_state`
-call is handled locally by the orchestrator and never reaches a provider.
+strictly to the provider whitelist; three internal workflow calls are handled
+locally by the orchestrator and never reach a provider.
 """
 
 from __future__ import annotations
@@ -12,22 +12,28 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-TOOL_AMAP_WEATHER = "amap_weather"
+TOOL_AMAP_WEATHER_RANGE = "amap_weather_range"
 TOOL_AMAP_POI_SEARCH = "amap_poi_search"
 TOOL_AMAP_POI_AROUND = "amap_poi_around"
 TOOL_AMAP_ROUTE = "amap_route"
 TOOL_QUERY_RAIL = "query_rail_tickets"
-TOOL_QUERY_FLIGHTS = "query_flights"
+TOOL_DECLARE_TRIP_SCOPE = "declare_trip_scope"
 TOOL_UPDATE_PLANNING_FACT_STATE = "update_planning_fact_state"
+TOOL_FINISH_RESEARCH = "finish_research"
 
 
-class WeatherArgs(BaseModel):
+class AliasModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class WeatherRangeArgs(AliasModel):
     city: str
-    date: str  # YYYY-MM-DD
+    start_date: str = Field(alias="startDate")
+    end_date: str = Field(alias="endDate")
 
-    @field_validator("city", "date")
+    @field_validator("city", "start_date", "end_date")
     @classmethod
     def _non_empty(cls, v: str) -> str:
         if not v or not v.strip():
@@ -79,18 +85,28 @@ class PoiAroundArgs(BaseModel):
         return min(v, 50000)
 
 
-class RouteArgs(BaseModel):
-    origin: str
-    destination: str
+class RouteArgs(AliasModel):
+    origin: str | None = None
+    destination: str | None = None
+    origin_location: str | None = Field(default=None, alias="originLocation")
+    destination_location: str | None = Field(default=None, alias="destinationLocation")
     mode: Literal["driving", "transit", "walking", "bicycling"]
     city: str | None = None
 
-    @field_validator("origin", "destination")
+    @field_validator(
+        "origin", "destination", "origin_location", "destination_location"
+    )
     @classmethod
-    def _non_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("must be non-empty")
-        return v.strip()
+    def _clean_optional(cls, v: str | None) -> str | None:
+        return v.strip() if v and v.strip() else None
+
+    @model_validator(mode="after")
+    def _has_both_endpoints(self) -> "RouteArgs":
+        if not (self.origin or self.origin_location):
+            raise ValueError("origin or originLocation is required")
+        if not (self.destination or self.destination_location):
+            raise ValueError("destination or destinationLocation is required")
+        return self
 
 
 class RailArgs(BaseModel):
@@ -106,27 +122,35 @@ class RailArgs(BaseModel):
         return v.strip()
 
 
-class FlightArgs(BaseModel):
-    origin: str
-    destination: str
-    date: str  # YYYY-MM-DD
+class DeclareTripScopeArgs(AliasModel):
+    origin: str | None = None
+    destinations: list[str]
+    start_date: str | None = Field(default=None, alias="startDate")
+    end_date: str | None = Field(default=None, alias="endDate")
+    needs_transport: bool = Field(alias="needsTransport")
+    needs_hotel: bool = Field(alias="needsHotel")
+    interests: list[str] = []
+    uncertainties: list[str] = []
 
-    @field_validator("origin", "destination", "date")
-    @classmethod
-    def _non_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("must be non-empty")
-        return v.strip()
+
+class PlanningFactStateArgs(AliasModel):
+    selected_fact_ids: list[str] = Field(alias="selectedFactIds")
+    remaining_queries: list[str] = Field(alias="remainingQueries")
+
+
+class FinishResearchArgs(BaseModel):
+    completed: list[str]
+    unresolved: list[str]
+    outline: list[str]
 
 
 # tool_name → argument schema, used for validation in travel_fact_service.
 ARG_SCHEMAS: dict[str, type[BaseModel]] = {
-    TOOL_AMAP_WEATHER: WeatherArgs,
+    TOOL_AMAP_WEATHER_RANGE: WeatherRangeArgs,
     TOOL_AMAP_POI_SEARCH: PoiArgs,
     TOOL_AMAP_POI_AROUND: PoiAroundArgs,
     TOOL_AMAP_ROUTE: RouteArgs,
     TOOL_QUERY_RAIL: RailArgs,
-    TOOL_QUERY_FLIGHTS: FlightArgs,
 }
 
 
@@ -136,8 +160,8 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": TOOL_AMAP_WEATHER,
-            "description": "查询某城市在指定日期的天气（高德官方真实事实）。用于判断是否适合户外活动、是否需要带雨具/防晒等。",
+            "name": TOOL_AMAP_WEATHER_RANGE,
+            "description": "一次查询一个城市在连续日期范围内的逐日天气（高德官方真实事实），避免按天重复调用。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -145,9 +169,10 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
                         "type": "string",
                         "description": "城市名，如 “大理”、“北京”",
                     },
-                    "date": {"type": "string", "description": "日期，格式 YYYY-MM-DD"},
+                    "startDate": {"type": "string", "description": "开始日期，格式 YYYY-MM-DD"},
+                    "endDate": {"type": "string", "description": "结束日期，格式 YYYY-MM-DD"},
                 },
-                "required": ["city", "date"],
+                "required": ["city", "startDate", "endDate"],
             },
         },
     },
@@ -205,11 +230,19 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
                 "properties": {
                     "origin": {
                         "type": "string",
-                        "description": "起点，优先传 POI 返回的 lng,lat；否则用站名/景点短名，避免完整商业 POI 名",
+                        "description": "起点名称；已有坐标时仍建议提供，便于最终展示",
                     },
                     "destination": {
                         "type": "string",
-                        "description": "终点，优先传 POI 返回的 lng,lat；否则用站名/景点短名，避免完整商业 POI 名",
+                        "description": "终点名称；已有坐标时仍建议提供，便于最终展示",
+                    },
+                    "originLocation": {
+                        "type": "string",
+                        "description": "起点 POI 坐标 lng,lat；提供后不再地理编码",
+                    },
+                    "destinationLocation": {
+                        "type": "string",
+                        "description": "终点 POI 坐标 lng,lat；提供后不再地理编码",
                     },
                     "mode": {
                         "type": "string",
@@ -221,7 +254,7 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
                         "description": "公交/地铁 transit 模式的城市名或 adcode（可选但建议提供）",
                     },
                 },
-                "required": ["origin", "destination", "mode"],
+                "required": ["mode"],
             },
         },
     },
@@ -244,70 +277,96 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": TOOL_QUERY_FLIGHTS,
-            "description": "查询两城之间某日期的航班参考信息（航班号/时刻/参考票价，来自社区航班 MCP，参考级、非权威）。结果须以航司官方实时为准。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "origin": {"type": "string", "description": "出发城市"},
-                    "destination": {"type": "string", "description": "到达城市"},
-                    "date": {
-                        "type": "string",
-                        "description": "乘机日期，格式 YYYY-MM-DD",
-                    },
-                },
-                "required": ["origin", "destination", "date"],
-            },
-        },
-    },
 ]
 
 
-# Internal orchestration tool: no provider call and no external-call budget.
-# The model selects facts by backend-issued IDs; the orchestrator resolves each
-# ID back to the complete original tool fact before compacting message history.
+PLANNING_SCOPE_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": TOOL_DECLARE_TRIP_SCOPE,
+        "description": "声明你从用户自然语言和已有 context 中理解出的旅行范围。每次规划研究开始必须先调用；后端只保存，不自行提取或改写。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "destinations": {"type": "array", "items": {"type": "string"}},
+                "startDate": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "endDate": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "needsTransport": {"type": "boolean"},
+                "needsHotel": {"type": "boolean"},
+                "interests": {"type": "array", "items": {"type": "string"}},
+                "uncertainties": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "origin",
+                "destinations",
+                "startDate",
+                "endDate",
+                "needsTransport",
+                "needsHotel",
+                "interests",
+                "uncertainties",
+            ],
+        },
+    },
+}
+
+
 PLANNING_FACT_STATE_TOOL: dict = {
     "type": "function",
     "function": {
         "name": TOOL_UPDATE_PLANNING_FACT_STATE,
         "description": (
-            "读取新的外部工具结果、准备继续下一轮查询时更新 PlanningFactState。仅选择后续规划可能使用的"
-            "fact_id，并说明用途；后端会完整保留所选事实的所有原始字段、裁剪未选事实。"
-            "同时列出仍缺少的事实，以便继续主动查询。此工具不访问外部服务。"
+            "从已返回结果中选择后续生成行程需要保留的 fact_id，并列出还需要执行的具体查询。"
+            "后端会按 ID 完整保留事实；此工具不访问外部服务，也不占外部调用预算。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "selected_facts": {
+                "selectedFactIds": {
                     "type": "array",
-                    "description": "本次规划仍可能使用的事实；必须包含此前仍需保留的事实",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "fact_id": {
-                                "type": "string",
-                                "description": "外部工具结果中的 fact_id",
-                            },
-                            "purpose": {
-                                "type": "string",
-                                "description": "该事实将用于酒店、景点、餐饮、交通、天气等哪项决策",
-                            },
-                        },
-                        "required": ["fact_id", "purpose"],
-                    },
+                    "description": "后续仍需使用的事实 ID；必须重新包含此前仍需保留的 ID",
+                    "items": {"type": "string"},
                 },
-                "missing_facts": {
+                "remainingQueries": {
                     "type": "array",
-                    "description": "扣除同一响应已安排的外部查询后，生成可执行行程仍缺少的具体事实；查询失败时下一轮补回",
+                    "description": "仍待完成的具体查询，例如酒店到主要景点路线",
                     "items": {"type": "string"},
                 },
             },
-            "required": ["selected_facts", "missing_facts"],
+            "required": ["selectedFactIds", "remainingQueries"],
         },
     },
 }
 
-PLANNING_TOOLS: list[dict] = [*PLANNING_EXTERNAL_TOOLS, PLANNING_FACT_STATE_TOOL]
+
+PLANNING_FINISH_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": TOOL_FINISH_RESEARCH,
+        "description": "仅在关键事实查询已经完成或明确列入 unresolved 后调用。调用后后端关闭工具并让同一个模型生成最终行程。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "completed": {"type": "array", "items": {"type": "string"}},
+                "unresolved": {"type": "array", "items": {"type": "string"}},
+                "outline": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["completed", "unresolved", "outline"],
+        },
+    },
+}
+
+
+PLANNING_INTERNAL_TOOLS: list[dict] = [
+    PLANNING_SCOPE_TOOL,
+    PLANNING_FACT_STATE_TOOL,
+    PLANNING_FINISH_TOOL,
+]
+PLANNING_TOOLS: list[dict] = [*PLANNING_INTERNAL_TOOLS, *PLANNING_EXTERNAL_TOOLS]

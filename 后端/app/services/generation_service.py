@@ -124,12 +124,40 @@ def _enforce_postcard_plan(
 def _validate_report(draft: ReportDraftResult) -> None:
     if not draft.location.strip() or not draft.personality_summary.strip() or not draft.content.strip():
         raise AIGenerationError("AI 生成失败：报告字段不完整")
+    narrative_chars = len("".join(draft.content.split()))
+    narrative_blocks = [
+        block.strip()
+        for block in draft.content.replace("\r\n", "\n").split("\n")
+        if block.strip()
+    ]
+    if not 180 <= narrative_chars <= 240:
+        raise AIGenerationError("AI 生成失败：人格正文应为 180-240 字")
+    required_markers = ("瞬间一｜", "瞬间二｜", "瞬间三｜", "人格判词｜")
+    if len(narrative_blocks) != 5 or any(
+        not narrative_blocks[index].startswith(marker)
+        for index, marker in enumerate(required_markers, start=1)
+    ):
+        raise AIGenerationError("AI 生成失败：人格正文必须包含引言、三个旅行瞬间和人格判词")
     dims = [point.dimension for point in draft.chart_data]
     if list(dims) != list(RADAR_DIMENSIONS):
         raise AIGenerationError("AI 生成失败：雷达图维度必须完整且顺序固定")
     for point in draft.chart_data:
         if not (0 <= point.value <= 100):
             raise AIGenerationError("AI 生成失败：雷达图分值超出 0-100")
+    profile = draft.profile_data
+    if [item.id for item in profile.spectrums] != [
+        "environment",
+        "depth",
+        "planning",
+        "social",
+    ]:
+        raise AIGenerationError("AI 生成失败：旅行光谱必须完整且顺序固定")
+    if any(not 0 <= item.value <= 100 for item in profile.spectrums):
+        raise AIGenerationError("AI 生成失败：旅行光谱分值超出 0-100")
+    if not 3 <= len(profile.keywords) <= 5 or len(profile.modules) != 3:
+        raise AIGenerationError("AI 生成失败：人格关键词或模块数量不合法")
+    if any(not 30 <= len(item.content.strip()) <= 60 for item in profile.modules):
+        raise AIGenerationError("AI 生成失败：人格模块应为 30-60 字")
 
 
 def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
@@ -181,6 +209,29 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             location=analysis.overall_location,
             start_date=analysis.start_date,
             end_date=analysis.end_date,
+            photo_count=len(analysis.photos),
+            suitability_counts={
+                level: sum(photo.suitability == level for photo in analysis.photos)
+                for level in ("good", "usable", "unsuitable")
+            },
+            location_guess_count=sum(
+                photo.location_guess is not None for photo in analysis.photos
+            ),
+            taken_date_guess_count=sum(
+                photo.taken_date_guess is not None for photo in analysis.photos
+            ),
+            photo_summaries=[
+                {
+                    "asset_id": photo.asset_id,
+                    "suitability": photo.suitability,
+                    "location_guess": photo.location_guess,
+                    "taken_date_guess": photo.taken_date_guess,
+                    "scene_summary": photo.scene_summary[:300],
+                    "postcard_reason": (photo.postcard_reason or "")[:300],
+                    "report_reason": (photo.report_reason or "")[:300],
+                }
+                for photo in analysis.photos
+            ],
         )
 
         date_label = date_label_service.generate_label(analysis.start_date, analysis.end_date)
@@ -233,6 +284,17 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             "generate_persist_results",
             postcard_count=len(postcard_renders),
             has_report=report_draft is not None,
+            report_profile_version=2 if report_draft is not None else None,
+            report_archetype=(
+                report_draft.profile_data.archetype_name
+                if report_draft is not None
+                else None
+            ),
+            report_visual_theme=(
+                report_draft.profile_data.visual_theme
+                if report_draft is not None
+                else None
+            ),
         ):
             with session_scope() as session:
                 result = _persist_results(
@@ -290,13 +352,71 @@ def _draft_and_validate_report(
     requirements: str,
     memory_summary: str,
 ) -> ReportDraftResult:
-    with timed_stage("generate_draft_report"):
+    diagnostics: dict[str, object] = {}
+    with timed_stage(
+        "generate_draft_report",
+        profile_version=2,
+        source_photo_count=len(analysis.photos),
+        requirements_chars=len(requirements),
+        memory_summary_chars=len(memory_summary),
+        diagnostics=diagnostics,
+    ):
         draft = orchestrator.draft_report(
             analysis=analysis,
             requirements=requirements,
             memory_summary=memory_summary,
         )
         _validate_report(draft)
+        profile = draft.profile_data
+        diagnostics.update(
+            {
+                "location": draft.location,
+                "start_date": draft.start_date,
+                "end_date": draft.end_date,
+                "personality_summary": draft.personality_summary,
+                "archetype_id": profile.archetype_id,
+                "archetype_name": profile.archetype_name,
+                "persona_code": profile.persona_code,
+                "visual_theme": profile.visual_theme,
+                "slogan_chars": len(profile.slogan),
+                "spectrums": [
+                    {"id": item.id, "value": item.value}
+                    for item in profile.spectrums
+                ],
+                "keywords": profile.keywords,
+                "keyword_count": len(profile.keywords),
+                "modules": [
+                    {
+                        "title": item.title,
+                        "content_chars": len(item.content),
+                        "content_excerpt": item.content[:180],
+                    }
+                    for item in profile.modules
+                ],
+                "module_count": len(profile.modules),
+                "content_chars": len(draft.content),
+                "narrative_chars_without_whitespace": len(
+                    "".join(draft.content.split())
+                ),
+                "narrative_block_count": len(
+                    [
+                        block
+                        for block in draft.content.replace("\r\n", "\n").split("\n")
+                        if block.strip()
+                    ]
+                ),
+                "narrative_markers": [
+                    marker
+                    for marker in ("瞬间一｜", "瞬间二｜", "瞬间三｜", "人格判词｜")
+                    if marker in draft.content
+                ],
+                "content_excerpt": draft.content[:500],
+                "chart_data": [
+                    point.model_dump(by_alias=True) for point in draft.chart_data
+                ],
+                "next_trip_inspiration": profile.next_trip_inspiration[:400],
+            }
+        )
     return draft
 
 
@@ -554,6 +674,8 @@ def _persist_results(
             personality_summary=report_draft.personality_summary,
             content=report_draft.content,
             chart_data=[point.model_dump() for point in report_draft.chart_data],
+            profile_version=2,
+            profile_data=report_draft.profile_data.model_dump(by_alias=True),
         )
         session.add(report)
         session.flush()

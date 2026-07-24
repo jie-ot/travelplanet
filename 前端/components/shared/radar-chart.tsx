@@ -69,7 +69,7 @@ export function RadarChart({ data, size = 260 }: { data: ReportChartPoint[]; siz
               y={p.y - 4}
               textAnchor={anchor}
               className="fill-foreground"
-              style={{ fontSize: 11, fontWeight: 600 }}
+              style={{ fontSize: 18, fontWeight: 700 }}
             >
               {d.dimension}
             </text>
@@ -78,7 +78,7 @@ export function RadarChart({ data, size = 260 }: { data: ReportChartPoint[]; siz
               y={p.y + 9}
               textAnchor={anchor}
               className="fill-muted-foreground"
-              style={{ fontSize: 10 }}
+              style={{ fontSize: 16 }}
             >
               {d.value}
             </text>

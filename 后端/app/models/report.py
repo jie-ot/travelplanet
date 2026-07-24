@@ -31,5 +31,10 @@ class Report(SQLModel, table=True):
     content: str = Field(sa_column=Column(Text, nullable=False))
     # ReportChartPoint[] — five radar dimensions, validated at service/DTO layer.
     chart_data: list[Any] = Field(default_factory=list, sa_column=Column(SA_JSON, nullable=False))
+    # V2 "旅行人格星球" payload. Nullable for full backward compatibility.
+    profile_version: int | None = Field(default=None, nullable=True)
+    profile_data: dict[str, Any] | None = Field(
+        default=None, sa_column=Column(SA_JSON, nullable=True)
+    )
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)

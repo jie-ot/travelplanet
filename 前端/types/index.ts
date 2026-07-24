@@ -4,7 +4,7 @@
  * 严格对齐《数据结构与通信接口规范》。
  * - 对外 DTO（PostcardGroup / Postcard / Report / Plan / FileAsset / UploadedPhoto / ReportChartPoint）统一 camelCase
  * - ItineraryData 一支（trip_info / preparations / bookings / itinerary / schedule）统一 snake_case
- * 不得新增、删除、改名或改变可选性。
+ * 兼容升级只新增可选字段，不删除或改名旧字段。
  */
 
 /* ---------------- 明信片组 (PostcardGroup) ---------------- */
@@ -60,6 +60,42 @@ export interface Report {
   personalitySummary: string
   content: string
   chartData: ReportChartPoint[]
+  profileVersion?: number | null
+  profileData?: TravelProfileData | null
+}
+
+export type VisualTheme =
+  | "forest_light"
+  | "ocean_blue"
+  | "sunset_orange"
+  | "museum_gold"
+  | "city_neon"
+  | "night_purple"
+  | "snow_silver"
+  | "desert_amber"
+
+export interface ProfileSpectrum {
+  id: "environment" | "depth" | "planning" | "social"
+  leftLabel: string
+  rightLabel: string
+  value: number
+}
+
+export interface ProfileModule {
+  title: string
+  content: string
+}
+
+export interface TravelProfileData {
+  archetypeId: string
+  archetypeName: string
+  personaCode: string
+  slogan: string
+  spectrums: ProfileSpectrum[]
+  keywords: string[]
+  modules: ProfileModule[]
+  nextTripInspiration: string
+  visualTheme: VisualTheme
 }
 
 /* ---------------- 雷达图数据点 (ReportChartPoint) ---------------- */
@@ -91,6 +127,16 @@ export interface ItineraryData {
   bookings: Booking[]
   food_recommendations: string[]
   itinerary: DailyItinerary[]
+  experience_summary?: ExperienceSummary | null
+}
+
+export interface ExperienceSummary {
+  tripTheme?: string
+  pace?: string
+  intensity?: number
+  highlights?: string[]
+  weatherSummary?: string
+  personalizationTags?: string[]
 }
 
 export interface TripInfo {
@@ -125,6 +171,20 @@ export interface Schedule {
   activity: string
   transport?: string | null
   note?: string | null
+  place_name?: string | null
+  location?: string | null
+  duration_minutes?: number | null
+  travel_minutes?: number | null
+  distance_km?: number | null
+  transport_mode?: "driving" | "transit" | "walking" | "bicycling" | null
+  tags?: string[]
+  booking_required?: boolean
+  fact_status?: "verified" | "reference" | "unverified" | null
+  fact_refs?: string[]
+  action?: {
+    type: "map" | "booking" | "details" | "alternative" | "complete"
+    label: string
+  } | null
 }
 
 /* ---------------- 业务状态码（前端展示用，对齐 0.6） ---------------- */

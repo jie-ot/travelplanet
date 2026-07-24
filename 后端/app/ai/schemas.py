@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.models.dto import ReportChartPoint
+from app.models.dto import ReportChartPoint, TravelProfileData
 
 __all__ = [
     "PhotoAnalysisItem",
@@ -74,6 +74,7 @@ class ReportDraftResult(BaseModel):
     personality_summary: str
     content: str
     chart_data: list[ReportChartPoint]
+    profile_data: TravelProfileData
 
 
 class MemoryUpdateResult(BaseModel):

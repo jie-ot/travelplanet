@@ -49,7 +49,15 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
         # through the Function Calling loop; the prompt supplies B-class fallback
         # rules for use only after a relevant tool fails or is unavailable.
         request_id = id_service.new_id("toolreq_")
-        log_event("planning_tool_request_created", request_id=request_id)
+        log_event(
+            "planning_tool_request_created",
+            request_id=request_id,
+            task_type="planning",
+            protocol="declare_scope_fact_state_finish_audit_v1",
+            is_refinement=request.context is not None,
+            message_chars=len(request.message),
+            message_excerpt=_excerpt(request.message),
+        )
         fact_pack_dict = None
         if travel_fact_service.needs_facts(request.message, request.context):
             with timed_stage("planning_build_fact_pack"):
@@ -68,7 +76,6 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
                         tool_calls=len(pack.tool_calls),
                         booking_evidences=len(pack.booking_evidences),
                         rails=len(pack.rails),
-                        flights=len(pack.flights),
                         weather=len(pack.weather),
                         pois=len(pack.pois),
                         summary=_summarize_fact_pack(fact_pack_dict),
@@ -93,6 +100,9 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
             context=_summarize_context(request.context),
             memory_summary_chars=len(memory_summary),
             fact_pack=_summarize_fact_pack(fact_pack_dict),
+            request_id=request_id,
+            is_refinement=request.context is not None,
+            protocol="declare_scope_fact_state_finish_audit_v1",
         )
 
         # Function-calling executor: the model proposes whitelist tools; the
@@ -107,7 +117,12 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
                 arguments=arguments,
             )
 
-        with timed_stage("planning_model_generate"):
+        with timed_stage(
+            "planning_model_generate",
+            request_id=request_id,
+            is_refinement=request.context is not None,
+            protocol="declare_scope_fact_state_finish_audit_v1",
+        ):
             new_data = orchestrator.plan_itinerary(
                 message=request.message,
                 context=request.context,
@@ -117,7 +132,15 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
             )
         # Schedule order is deterministic, so correct model ordering mistakes
         # before positional stable-ID alignment and business validation.
-        with timed_stage("planning_align_and_validate"):
+        with timed_stage(
+            "planning_align_and_validate",
+            request_id=request_id,
+            generated_destination=new_data.trip_info.destination,
+            generated_day_count=len(new_data.itinerary),
+            generated_schedule_count=sum(
+                len(day.schedules) for day in new_data.itinerary
+            ),
+        ):
             reordered_dates = itinerary_validation_service.normalize_schedule_order(
                 new_data
             )
@@ -138,6 +161,7 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
             status="success",
             destination=aligned.trip_info.destination,
             day_count=len(aligned.itinerary),
+            request_id=request_id,
             structure=_summarize_itinerary(aligned),
         )
         return aligned
@@ -185,7 +209,6 @@ def _summarize_fact_pack(fact_pack: dict[str, Any] | None) -> dict[str, Any] | N
         "weather": _summarize_facts(fact_pack.get("weather") or []),
         "pois": _summarize_facts(fact_pack.get("pois") or []),
         "rails": _summarize_facts(fact_pack.get("rails") or []),
-        "flights": _summarize_facts(fact_pack.get("flights") or []),
         "booking_evidences": [
             {
                 "booking_type": item.get("booking_type"),
@@ -229,7 +252,6 @@ def _summarize_facts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "distance_km",
                     "duration_minutes",
                     "train_no",
-                    "flight_no",
                     "depart_time",
                     "arrive_time",
                     "ref_price",
@@ -241,11 +263,42 @@ def _summarize_facts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _summarize_itinerary(data: ItineraryData) -> dict[str, Any]:
+    schedule_dicts = [
+        schedule.model_dump(by_alias=True)
+        for day in data.itinerary
+        for schedule in day.schedules
+    ]
+    fact_refs = [
+        fact_id
+        for schedule in schedule_dicts
+        for fact_id in (schedule.get("fact_refs") or [])
+    ]
     return {
-        "trip_info": data.trip_info.model_dump(),
+        "trip_info": data.trip_info.model_dump(by_alias=True),
+        "experience_summary": (
+            data.experience_summary.model_dump(by_alias=True)
+            if data.experience_summary is not None
+            else None
+        ),
         "preparation_count": len(data.preparations),
         "booking_count": len(data.bookings),
         "food_count": len(data.food_recommendations),
+        "schedule_count": len(schedule_dicts),
+        "fact_ref_count": len(fact_refs),
+        "unique_fact_ref_count": len(set(fact_refs)),
+        "fact_status_counts": _count_values(
+            schedule.get("fact_status") for schedule in schedule_dicts
+        ),
+        "missing_location_count": sum(
+            not schedule.get("location") for schedule in schedule_dicts
+        ),
+        "missing_route_evidence_count": sum(
+            bool(schedule.get("travel_minutes"))
+            and not any(
+                "route" in fact_id for fact_id in (schedule.get("fact_refs") or [])
+            )
+            for schedule in schedule_dicts
+        ),
         "days": [
             {
                 "id": day.id,
@@ -260,6 +313,26 @@ def _summarize_itinerary(data: ItineraryData) -> dict[str, Any]:
                         "end_time": schedule.end_time,
                         "activity": _excerpt(schedule.activity, 120),
                         "transport": schedule.transport,
+                        **{
+                            key: value
+                            for key, value in schedule.model_dump(
+                                by_alias=True
+                            ).items()
+                            if key
+                            in {
+                                "place_name",
+                                "location",
+                                "duration_minutes",
+                                "travel_minutes",
+                                "distance_km",
+                                "transport_mode",
+                                "tags",
+                                "booking_required",
+                                "fact_status",
+                                "fact_refs",
+                                "action",
+                            }
+                        },
                     }
                     for schedule in day.schedules
                 ],
@@ -267,3 +340,11 @@ def _summarize_itinerary(data: ItineraryData) -> dict[str, Any]:
             for day in data.itinerary
         ],
     }
+
+
+def _count_values(values) -> dict[str, int]:  # noqa: ANN001
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value or "unspecified")
+        counts[key] = counts.get(key, 0) + 1
+    return counts

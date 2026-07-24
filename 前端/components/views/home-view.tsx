@@ -35,7 +35,15 @@ const POSTCARD_BALLOON = "/images/home-postcard-balloon.png"
 const POSTCARD_LAKE = "/images/home-postcard-alpine-lake.png"
 
 export function HomeView() {
-  const { navigate, toast, toastCode, generateArtifacts, generating, postcardGroups } = useApp()
+  const {
+    navigate,
+    toast,
+    toastCode,
+    generateArtifacts,
+    generating,
+    postcardGroups,
+    beginNewPlan,
+  } = useApp()
   const [photos, setPhotos] = useState<LocalPhoto[]>([])
   const [requirements, setRequirements] = useState("")
   const [genPostcards, setGenPostcards] = useState(true)
@@ -100,7 +108,7 @@ export function HomeView() {
   }
 
   return (
-    <div className={styles.home}>
+    <div className={cn(styles.home, photos.length > 0 && styles.hasPhotos)}>
       <section className={styles.hero} aria-labelledby="home-title">
         <div className={styles.starField} aria-hidden />
         <div className={styles.contours} aria-hidden />
@@ -215,7 +223,10 @@ export function HomeView() {
           icon={<Map aria-hidden />}
           title="旅行规划"
           description="规划下一段旅程"
-          onClick={() => navigate({ page: "planning" })}
+          onClick={() => {
+            beginNewPlan()
+            navigate({ page: "planning" })
+          }}
           coral
         />
       </nav>

@@ -4,7 +4,7 @@ import { useRef, useState } from "react"
 import { useApp } from "@/components/shared/app-context"
 import { TopBar } from "@/components/shared/top-bar"
 import { ItineraryDetail } from "@/components/shared/itinerary-detail"
-import { PlanetLoader } from "@/components/shared/planet-loader"
+import { PlanningProgress } from "@/components/shared/planning-progress"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import { Sparkles, Save, RotateCcw, Wand2, History, Send } from "lucide-react"
 
@@ -80,6 +80,14 @@ export function PlanningView() {
     setSaved(false)
   }
 
+  function leavePlanning(action: () => void) {
+    beginNewPlan()
+    setPrompt("")
+    setRefinePrompt("")
+    setSaved(false)
+    action()
+  }
+
   // 离开规划页前若有未保存草稿则拦截确认
   function guardedLeave(action: () => void) {
     if (hasUnsavedDraft && draftItineraryData) {
@@ -101,11 +109,17 @@ export function PlanningView() {
     <div className="flex h-full flex-col">
       <TopBar
         title={editingPlanId ? "重新编辑规划" : "旅行规划"}
-        onBack={() => guardedLeave(goBack)}
+        onBack={() => guardedLeave(() => leavePlanning(goBack))}
         right={
           <button
             type="button"
-            onClick={() => guardedLeave(() => (editingPlanId ? goBack() : navigate({ page: "history" })))}
+            onClick={() =>
+              guardedLeave(() =>
+                leavePlanning(() =>
+                  editingPlanId ? goBack() : navigate({ page: "history" }),
+                ),
+              )
+            }
             className="ui-pressable flex min-h-11 items-center gap-1.5 rounded-full bg-card/94 px-3.5 py-2 text-xs font-semibold text-foreground shadow-sm ring-1 ring-border/80"
           >
             <History className="h-3.5 w-3.5 text-primary" aria-hidden />
@@ -147,19 +161,14 @@ export function PlanningView() {
         )}
 
         {phase === "generating" && (
-          <div className="flex h-full flex-col items-center justify-center gap-5 px-8 py-16">
-            <PlanetLoader />
-            <div className="text-center">
-              <p className="text-sm font-semibold text-foreground">星球正在为你规划行程…</p>
-              <p className="mt-1 text-xs text-muted-foreground">正在分析偏好、串联景点、编排每日节奏</p>
-              <p className="mt-2 text-xs text-muted-foreground">这可能需要3-5分钟</p>
-            </div>
+          <div className="min-h-full px-4 py-6 min-[400px]:px-5">
+            <PlanningProgress />
           </div>
         )}
 
         {phase === "result" && draftItineraryData && (
-          <div className="px-4 py-5 min-[400px]:px-5 min-[400px]:py-6">
-            <div className="mb-4 flex items-start gap-2 rounded-xl border border-primary/10 bg-secondary/85 px-3 py-2.5 text-sm text-secondary-foreground">
+          <div className="pb-6">
+            <div className="mx-4 mb-4 mt-5 flex items-start gap-2 rounded-xl border border-primary/10 bg-secondary/85 px-3 py-2.5 text-sm text-secondary-foreground min-[400px]:mx-5">
               <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
               <span>
                 {editingPlanId
@@ -223,7 +232,11 @@ export function PlanningView() {
             {saved && (
               <button
                 type="button"
-                onClick={() => (editingPlanId ? goBack() : navigate({ page: "history" }))}
+                onClick={() =>
+                  leavePlanning(() =>
+                    editingPlanId ? goBack() : navigate({ page: "history" }),
+                  )
+                }
                 className="ui-pressable min-h-11 rounded-full px-3 text-xs font-medium text-primary"
               >
                 前往「历史规划」查看 →

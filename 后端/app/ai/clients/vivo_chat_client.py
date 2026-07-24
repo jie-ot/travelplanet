@@ -104,6 +104,7 @@ def chat_messages(
     *,
     messages: list[dict[str, Any]],
     tools: list[dict] | None = None,
+    stage: str = "planning",
     temperature: float = 0.2,
     max_completion_tokens: int = 16000,
     timeout_seconds: int | None = None,
@@ -138,6 +139,15 @@ def chat_messages(
     if tools:
         extra["tools"] = tools
         extra["tool_choice"] = "auto"
+    call_details = _chat_call_details(
+        stage=stage,
+        messages=messages,
+        tools=tools,
+        temperature=temperature,
+        max_completion_tokens=max_completion_tokens,
+        timeout_seconds=timeout,
+        attempts=attempts,
+    )
 
     for attempt in range(attempts):
         request_id = str(uuid.uuid4())
@@ -163,6 +173,8 @@ def chat_messages(
                 request_id=request_id,
                 attempt=attempt + 1,
                 reason="auth_or_permission",
+                **call_details,
+                **_api_error_details(exc),
             )
             raise InternalError("模型服务鉴权或权限错误") from exc
         except BadRequestError as exc:
@@ -173,6 +185,8 @@ def chat_messages(
                 request_id=request_id,
                 attempt=attempt + 1,
                 reason="bad_request",
+                **call_details,
+                **_api_error_details(exc),
             )
             raise AIGenerationError("AI 生成失败：请求被模型拒绝") from exc
         except (APITimeoutError, APIConnectionError, InternalServerError, RateLimitError) as exc:
@@ -188,6 +202,8 @@ def chat_messages(
                 attempt=attempt + 1,
                 attempts=attempts,
                 reason=type(exc).__name__,
+                **call_details,
+                **_api_error_details(exc),
             )
             _sleep_before_retry(attempt, attempts)
             continue
@@ -199,6 +215,8 @@ def chat_messages(
                 request_id=request_id,
                 attempt=attempt + 1,
                 reason=type(exc).__name__,
+                **call_details,
+                **_api_error_details(exc),
             )
             raise InternalError("模型服务内部错误") from exc
 
@@ -224,6 +242,14 @@ def chat_messages(
             request_id=request_id,
             latency_ms=latency_ms,
             tool_calls=len(tool_calls),
+            content_chars=len(message.content or ""),
+            content_excerpt=_bounded_text(message.content, 500),
+            returned_tool_names=[call.name for call in tool_calls],
+            tool_argument_chars=sum(len(call.arguments) for call in tool_calls),
+            finish_reason=getattr(resp.choices[0], "finish_reason", None),
+            response_id=getattr(resp, "id", None),
+            **call_details,
+            **_usage_details(resp),
         )
         return ChatTurn(content=message.content, tool_calls=tool_calls)
 
@@ -236,6 +262,8 @@ def chat_messages(
         status="failed",
         reason="exhausted_retries",
         last_error=type(last_transient).__name__ if last_transient else None,
+        **call_details,
+        **(_api_error_details(last_transient) if last_transient else {}),
     )
     raise AIGenerationError("AI 生成失败：模型服务暂时不可用，请重试")
 
@@ -293,6 +321,17 @@ def _real_chat_json(
     empty_content_retries_left = 2
     attempt = 0
     timeout = _text_timeout_seconds(task=task, override=timeout_seconds)
+    call_details = {
+        "model": settings.VIVO_CHAT_MODEL,
+        "system_prompt_chars": len(system_prompt),
+        "user_text_chars": len(user_text),
+        "image_count": len(image_data_urls or []),
+        "temperature": temperature,
+        "max_completion_tokens": max_completion_tokens,
+        "timeout_seconds": timeout,
+        "max_attempts": attempts,
+        "reasoning_effort": _VIVO_REASONING_EFFORT,
+    }
 
     while attempt < attempts:
         request_id = str(uuid.uuid4())
@@ -319,6 +358,8 @@ def _real_chat_json(
                 request_id=request_id,
                 attempt=attempt + 1,
                 reason="auth_or_permission",
+                **call_details,
+                **_api_error_details(exc),
             )
             raise InternalError("模型服务鉴权或权限错误") from exc
         except BadRequestError as exc:
@@ -331,6 +372,8 @@ def _real_chat_json(
                 request_id=request_id,
                 attempt=attempt + 1,
                 reason="bad_request",
+                **call_details,
+                **_api_error_details(exc),
             )
             raise AIGenerationError("AI 生成失败：请求被模型拒绝") from exc
         except (APITimeoutError, APIConnectionError, InternalServerError, RateLimitError) as exc:
@@ -348,6 +391,8 @@ def _real_chat_json(
                 attempt=attempt + 1,
                 attempts=attempts,
                 reason=type(exc).__name__,
+                **call_details,
+                **_api_error_details(exc),
             )
             attempt += 1
             _sleep_before_retry(attempt - 1, attempts)
@@ -361,6 +406,8 @@ def _real_chat_json(
                 request_id=request_id,
                 attempt=attempt + 1,
                 reason=type(exc).__name__,
+                **call_details,
+                **_api_error_details(exc),
             )
             raise InternalError("模型服务内部错误") from exc
 
@@ -376,6 +423,16 @@ def _real_chat_json(
             task=task,
             request_id=request_id,
             latency_ms=latency_ms,
+            content_chars=len(content or ""),
+            content_excerpt=_bounded_text(content, 500),
+            finish_reason=(
+                getattr(resp.choices[0], "finish_reason", None)
+                if getattr(resp, "choices", None)
+                else None
+            ),
+            response_id=getattr(resp, "id", None),
+            **call_details,
+            **_usage_details(resp),
         )
         if not content or not content.strip():
             log_event(
@@ -385,6 +442,8 @@ def _real_chat_json(
                 request_id=request_id,
                 latency_ms=latency_ms,
                 reason="empty_content",
+                **call_details,
+                **_usage_details(resp),
             )
             if empty_content_retries_left > 0:
                 empty_content_retries_left -= 1
@@ -394,6 +453,8 @@ def _real_chat_json(
                     task=task,
                     request_id=request_id,
                     reason="empty_content",
+                    retries_left=empty_content_retries_left,
+                    **call_details,
                 )
                 _sleep_before_retry(0, 2)
                 continue
@@ -408,8 +469,81 @@ def _real_chat_json(
         task=task,
         reason="exhausted_retries",
         last_error=type(last_transient).__name__ if last_transient else None,
+        **call_details,
+        **(_api_error_details(last_transient) if last_transient else {}),
     )
     raise AIGenerationError("AI 生成失败：模型服务暂时不可用，请重试")
+
+
+def _chat_call_details(
+    *,
+    stage: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict] | None,
+    temperature: float,
+    max_completion_tokens: int,
+    timeout_seconds: int,
+    attempts: int,
+) -> dict[str, Any]:
+    role_counts: dict[str, int] = {}
+    content_chars = 0
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        role_counts[role] = role_counts.get(role, 0) + 1
+        content = message.get("content")
+        if isinstance(content, str):
+            content_chars += len(content)
+        elif content is not None:
+            content_chars += len(str(content))
+    tool_names = []
+    for tool in tools or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(function, dict) and function.get("name"):
+            tool_names.append(str(function["name"]))
+    return {
+        "stage": stage,
+        "model": settings.VIVO_CHAT_MODEL,
+        "message_count": len(messages),
+        "message_role_counts": role_counts,
+        "message_content_chars": content_chars,
+        "tool_schema_count": len(tools or []),
+        "tool_schema_names": tool_names,
+        "temperature": temperature,
+        "max_completion_tokens": max_completion_tokens,
+        "timeout_seconds": timeout_seconds,
+        "max_attempts": attempts,
+        "reasoning_effort": _VIVO_REASONING_EFFORT,
+    }
+
+
+def _usage_details(response: Any) -> dict[str, Any]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+
+
+def _api_error_details(exc: Exception) -> dict[str, Any]:
+    response = getattr(exc, "response", None)
+    return {
+        "error_type": type(exc).__name__,
+        "error_message": _bounded_text(str(exc), 2000),
+        "http_status": getattr(exc, "status_code", None)
+        or getattr(response, "status_code", None),
+        "error_code": getattr(exc, "code", None),
+        "error_request_id": getattr(exc, "request_id", None),
+    }
+
+
+def _bounded_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _sleep_before_retry(attempt: int, attempts: int) -> None:

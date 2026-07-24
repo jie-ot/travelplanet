@@ -1,8 +1,8 @@
 """Outward DTOs — the single front/back-end contract.
 
 Master definition: 《数据结构与通信接口规范》一、三. Field names, types,
-optionality and enums are the project's unique contract; never add, rename or
-change optionality. All outward DTOs are camelCase via `to_camel`; the
+optionality and enums are the project's unique contract; compatibility changes
+must be additive and optional. All outward DTOs are camelCase via `to_camel`; the
 `ItineraryData` family stays snake_case (see `app.models.itinerary`).
 """
 
@@ -17,6 +17,16 @@ from app.models.itinerary import ItineraryData
 
 # Outward enums (mirrored from the DB enum table & 1.4/1.5/1.7).
 RadarDimension = Literal["自然探索", "人文体验", "美食偏好", "慢节奏", "社交意愿"]
+VisualTheme = Literal[
+    "forest_light",
+    "ocean_blue",
+    "sunset_orange",
+    "museum_gold",
+    "city_neon",
+    "night_purple",
+    "snow_silver",
+    "desert_amber",
+]
 # Fixed radar dimension order for stable chart rendering.
 RADAR_DIMENSIONS: tuple[RadarDimension, ...] = (
     "自然探索",
@@ -69,6 +79,30 @@ class ReportChartPoint(CamelModel):
     value: int
 
 
+class ProfileSpectrum(CamelModel):
+    id: Literal["environment", "depth", "planning", "social"]
+    left_label: str
+    right_label: str
+    value: int
+
+
+class ProfileModule(CamelModel):
+    title: str
+    content: str
+
+
+class TravelProfileData(CamelModel):
+    archetype_id: str
+    archetype_name: str
+    persona_code: str
+    slogan: str
+    spectrums: list[ProfileSpectrum]
+    keywords: list[str]
+    modules: list[ProfileModule]
+    next_trip_inspiration: str
+    visual_theme: VisualTheme
+
+
 # —— 1.6 Report ——
 class Report(CamelModel):
     id: str
@@ -80,6 +114,8 @@ class Report(CamelModel):
     personality_summary: str
     content: str
     chart_data: list[ReportChartPoint]
+    profile_version: int | None = None
+    profile_data: TravelProfileData | None = None
 
 
 # —— 1.8 Plan —— (itineraryData stays snake_case)

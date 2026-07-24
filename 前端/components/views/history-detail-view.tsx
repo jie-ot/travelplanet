@@ -30,7 +30,7 @@ export function HistoryDetailView() {
   return (
     <div className="flex h-full flex-col">
       <TopBar title={plan.location} subtitle={plan.dateLabel} />
-      <div className="flex-1 overflow-y-auto no-scrollbar px-4 py-5 min-[400px]:px-5 min-[400px]:py-6">
+      <div className="flex-1 overflow-y-auto no-scrollbar">
         <ItineraryDetail data={plan.itineraryData} />
       </div>
     </div>

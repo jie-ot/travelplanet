@@ -22,7 +22,7 @@ FactStatus = Literal[
 
 class ToolCallResult(BaseModel):
     tool_name: str
-    provider: str  # amap / qweather / rail_query_mcp / flight_query_mcp / entry_guide
+    provider: str  # amap / qweather / rail_query_mcp / entry_guide
     status: FactStatus
     degraded_to_b: bool = False  # A′ failed → degraded to its B entry guide
     latency_ms: int | None = None
@@ -75,19 +75,6 @@ class RailFact(BaseModel):  # A′ rail_query_mcp (reference-level, non-authorit
     status: FactStatus  # even ok is reference-level; model must add "以官方为准"
 
 
-class FlightFact(BaseModel):  # A′ flight_query_mcp (reference-level, non-authoritative)
-    origin: str
-    destination: str
-    date: str  # YYYY-MM-DD
-    flight_no: str | None
-    depart_time: str | None
-    arrive_time: str | None
-    aircraft: str | None
-    ref_price: float | None
-    source: str = "community_mcp"
-    status: FactStatus
-
-
 class TravelFactPack(BaseModel):  # the only fact container injected into the prompt
     request_id: str
     generated_at: str  # ISO 8601
@@ -95,6 +82,5 @@ class TravelFactPack(BaseModel):  # the only fact container injected into the pr
     weather: list[WeatherFact] = []
     pois: list[PoiFact] = []
     rails: list[RailFact] = []  # A′ rail reference facts (empty when degraded)
-    flights: list[FlightFact] = []  # A′ flight reference facts (empty when degraded)
     booking_evidences: list[BookingEvidence] = []
     tool_calls: list[ToolCallResult] = []

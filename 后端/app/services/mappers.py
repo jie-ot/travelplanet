@@ -35,6 +35,11 @@ def postcard_group_to_dto(
 
 def report_to_dto(entity: ReportEntity) -> dto.Report:
     chart = [dto.ReportChartPoint.model_validate(point) for point in (entity.chart_data or [])]
+    profile_data = (
+        dto.TravelProfileData.model_validate(entity.profile_data)
+        if entity.profile_data
+        else None
+    )
     return dto.Report(
         id=entity.id,
         location=entity.location,
@@ -45,6 +50,8 @@ def report_to_dto(entity: ReportEntity) -> dto.Report:
         personality_summary=entity.personality_summary,
         content=entity.content,
         chart_data=chart,
+        profile_version=entity.profile_version,
+        profile_data=profile_data,
     )
 
 

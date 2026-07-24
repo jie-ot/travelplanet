@@ -18,6 +18,7 @@ import logging
 import re
 import threading
 import time
+from datetime import date, timedelta
 
 import httpx
 
@@ -164,6 +165,46 @@ def weather(city: str, date: str) -> WeatherFact:
                 ).strip()
                 return WeatherFact(city=city, date=date, summary=summary, status="ok")
     return WeatherFact(city=city, date=date, summary=None, status="unknown")
+
+
+def weather_range(city: str, start_date: str, end_date: str) -> list[WeatherFact]:
+    """Fetch one forecast payload and return each requested day, capped at 14 days."""
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError:
+        return [
+            WeatherFact(city=city, date=start_date, summary=None, status="unknown")
+        ]
+    if end < start:
+        start, end = end, start
+    end = min(end, start + timedelta(days=13))
+    requested = [
+        (start + timedelta(days=offset)).isoformat()
+        for offset in range((end - start).days + 1)
+    ]
+    data = _get(_WEATHER_PATH, {"city": city, "extensions": "all"})
+    casts_by_date: dict[str, dict] = {}
+    if data:
+        forecasts = data.get("forecasts") or []
+        if forecasts:
+            casts_by_date = {
+                str(item.get("date")): item
+                for item in (forecasts[0].get("casts") or [])
+                if item.get("date")
+            }
+    facts: list[WeatherFact] = []
+    for day in requested:
+        item = casts_by_date.get(day)
+        if item:
+            summary = (
+                f"{item.get('dayweather', '')} "
+                f"{item.get('nighttemp', '')}-{item.get('daytemp', '')}℃"
+            ).strip()
+            facts.append(WeatherFact(city=city, date=day, summary=summary, status="ok"))
+        else:
+            facts.append(WeatherFact(city=city, date=day, summary=None, status="unknown"))
+    return facts
 
 
 def poi_search(keyword: str, city: str | None = None) -> PoiFact:

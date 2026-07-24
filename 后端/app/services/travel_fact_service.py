@@ -17,13 +17,11 @@ from pydantic import ValidationError
 from app.ai.tools import (
     amap_provider,
     entry_guides,
-    flight_mcp_provider,
     rail_mcp_provider,
     tool_specs,
 )
 from app.ai.tools.schemas import (
     BookingEvidence,
-    FlightFact,
     PoiFact,
     RailFact,
     RouteFact,
@@ -31,7 +29,6 @@ from app.ai.tools.schemas import (
     WeatherFact,
 )
 from app.core.business_logging import log_event
-from app.core.config import settings
 from app.db.session import session_scope
 from app.models.base import utcnow
 from app.models.itinerary import ItineraryData
@@ -75,7 +72,6 @@ def build_fact_pack(
         weather_prefetched=0,
         pois_prefetched=0,
         rails_prefetched=0,
-        flights_prefetched=0,
     )
     return pack
 
@@ -94,16 +90,23 @@ def _persist_log(
     error_code: str | None,
 ) -> None:
     """Persist a single desensitized tool_call_logs row (non-fatal on failure)."""
+    normalized_status = _log_status(status)
     log_event(
         "tool_call",
-        status=_log_status(status),
+        status=normalized_status,
+        request_id=request_id,
+        task_type=task_type,
         tool_name=tool_name,
         provider=provider,
+        fact_status=status,
+        normalized_status=normalized_status,
         degraded_to_b=degraded_to_b,
         latency_ms=latency_ms,
         error_code=error_code,
-        input_summary=input_summary,
-        output_summary=output_summary,
+        input_summary=_diagnostic_value(input_summary),
+        output_summary=_diagnostic_value(output_summary),
+        output_keys=list(output_summary) if isinstance(output_summary, dict) else [],
+        has_error=normalized_status in {"failed", "timeout"},
     )
     try:
         with session_scope() as session:
@@ -117,7 +120,7 @@ def _persist_log(
                     provider=provider,
                     input_summary=input_summary,
                     output_summary=output_summary,
-                    status="fallback" if degraded_to_b else _log_status(status),
+                    status="fallback" if degraded_to_b else normalized_status,
                     degraded_to_b=degraded_to_b,
                     latency_ms=latency_ms,
                     error_code=error_code,
@@ -172,9 +175,12 @@ def execute_tool(
             status="failed",
             degraded_to_b=False,
             latency_ms=None,
-            input_summary={"raw": str(arguments)[:120]},
-            output_summary=None,
-            error_code="unsupported_tool",
+            input_summary={"arguments": _diagnostic_value(arguments)},
+            output_summary={
+                "reason": "tool_not_whitelisted",
+                "allowed_tools": sorted(tool_specs.ARG_SCHEMAS),
+            },
+            error_code="tool_not_whitelisted",
         )
         return {"tool": tool_name, "status": "error", "message": "未知或未授权的工具"}
 
@@ -190,8 +196,11 @@ def execute_tool(
             status="failed",
             degraded_to_b=False,
             latency_ms=None,
-            input_summary={"raw": str(arguments)[:120]},
-            output_summary=None,
+            input_summary={"arguments": _diagnostic_value(arguments)},
+            output_summary={
+                "reason": "invalid_args",
+                "validation_errors": _diagnostic_value(exc.errors()),
+            },
             error_code="invalid_args",
         )
         return {
@@ -201,8 +210,8 @@ def execute_tool(
         }
 
     try:
-        if tool_name == tool_specs.TOOL_AMAP_WEATHER:
-            return _exec_amap_weather(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_AMAP_WEATHER_RANGE:
+            return _exec_amap_weather_range(user_id, request_id, task_type, args)
         if tool_name == tool_specs.TOOL_AMAP_POI_SEARCH:
             return _exec_amap_poi(user_id, request_id, task_type, args)
         if tool_name == tool_specs.TOOL_AMAP_POI_AROUND:
@@ -211,9 +220,7 @@ def execute_tool(
             return _exec_amap_route(user_id, request_id, task_type, args)
         if tool_name == tool_specs.TOOL_QUERY_RAIL:
             return _exec_rail(user_id, request_id, task_type, args)
-        if tool_name == tool_specs.TOOL_QUERY_FLIGHTS:
-            return _exec_flight(user_id, request_id, task_type, args)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.exception("execute_tool failed (tool=%s, non-fatal)", tool_name)
         _persist_log(
             user_id,
@@ -224,8 +231,15 @@ def execute_tool(
             status="failed",
             degraded_to_b=False,
             latency_ms=None,
-            input_summary=None,
-            output_summary=None,
+            input_summary={
+                "validated_arguments": _diagnostic_value(
+                    args.model_dump(by_alias=True)
+                )
+            },
+            output_summary={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:2000],
+            },
             error_code="exec_error",
         )
         return {
@@ -237,48 +251,79 @@ def execute_tool(
     return {"tool": tool_name, "status": "error", "message": "未知或未授权的工具"}
 
 
-def _exec_amap_weather(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+def _diagnostic_value(value, *, depth: int = 0):  # noqa: ANN001, ANN202
+    """Bound persisted/logged payload size while retaining useful structure."""
+    if depth >= 5:
+        return "<max-depth>"
+    if isinstance(value, dict):
+        items = list(value.items())
+        result = {
+            str(key): _diagnostic_value(item, depth=depth + 1)
+            for key, item in items[:30]
+        }
+        if len(items) > 30:
+            result["_omitted_key_count"] = len(items) - 30
+        return result
+    if isinstance(value, (list, tuple)):
+        result = [_diagnostic_value(item, depth=depth + 1) for item in value[:20]]
+        if len(value) > 20:
+            result.append({"_omitted_item_count": len(value) - 20})
+        return result
+    if isinstance(value, str):
+        return value if len(value) <= 1600 else value[:1600] + "…"
+    return value
+
+
+def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
     if amap_provider.is_available():
-        fact = amap_provider.weather(args.city, args.date)
+        facts = amap_provider.weather_range(args.city, args.start_date, args.end_date)
         provider = "amap"
     else:
-        fact = WeatherFact(
-            city=args.city,
-            date=args.date,
-            summary=None,
-            status="provider_not_connected",
-        )
+        facts = [
+            WeatherFact(
+                city=args.city,
+                date=args.start_date,
+                summary=None,
+                status="provider_not_connected",
+            )
+        ]
         provider = "amap"
+    status = _facts_status(facts)
     _persist_log(
         user_id,
         request_id,
         task_type,
-        tool_name=tool_specs.TOOL_AMAP_WEATHER,
+        tool_name=tool_specs.TOOL_AMAP_WEATHER_RANGE,
         provider=provider,
-        status=fact.status,
+        status=status,
         degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
-        input_summary={"city": args.city, "date": args.date},
-        output_summary=_weather_summary(fact),
+        input_summary={
+            "city": args.city,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+        },
+        output_summary={"days": [_weather_summary(fact) for fact in facts]},
         error_code=None,
     )
     result = {
-        "tool": tool_specs.TOOL_AMAP_WEATHER,
-        "status": fact.status,
-        "city": fact.city,
-        "date": fact.date,
-        "summary": fact.summary,
+        "tool": tool_specs.TOOL_AMAP_WEATHER_RANGE,
+        "status": status,
+        "city": args.city,
+        "start_date": args.start_date,
+        "end_date": args.end_date,
+        "days": [_weather_summary(fact) for fact in facts],
     }
-    if fact.status != "ok":
-        result["note"] = "未获取到天气，建议以官方天气预报为准"
+    if status != "ok":
+        result["note"] = "部分或全部日期未获取到天气，建议以官方天气预报为准"
     return result
 
 
 def _exec_amap_poi(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
     if amap_provider.is_available():
-        facts = amap_provider.poi_search_many(args.keyword, city=args.city, limit=20)
+        facts = amap_provider.poi_search_many(args.keyword, city=args.city, limit=8)
         provider = "amap"
     else:
         facts = [
@@ -308,7 +353,7 @@ def _exec_amap_poi(user_id, request_id, task_type, args) -> dict:  # noqa: ANN00
     result = {
         "tool": tool_specs.TOOL_AMAP_POI_SEARCH,
         "status": status,
-        "pois": _poi_list_summary(facts[:20]),
+        "pois": _poi_list_summary(facts[:8]),
     }
     if status != "ok":
         result["note"] = "未获取到该地点信息，建议以官方/地图实际为准"
@@ -324,7 +369,7 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
             args.keywords,
             radius=args.radius,
             city=city_hint,
-            limit=20,
+            limit=8,
         )
         provider = "amap"
     else:
@@ -360,7 +405,7 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
     result = {
         "tool": tool_specs.TOOL_AMAP_POI_AROUND,
         "status": status,
-        "pois": _poi_list_summary(facts[:20]),
+        "pois": _poi_list_summary(facts[:8]),
     }
     if status != "ok":
         result["note"] = "未获取到周边 POI，建议以地图/官方平台实际为准"
@@ -369,26 +414,44 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
 
 def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
+    origin_name = args.origin or args.origin_location
+    destination_name = args.destination or args.destination_location
     city_hint = args.city or amap_provider.infer_city_hint(
-        args.origin, args.destination
+        origin_name, destination_name
     )
     if amap_provider.is_available():
-        origin_geo = amap_provider.geocode_detail(args.origin, city=city_hint)
-        dest_geo = amap_provider.geocode_detail(args.destination, city=city_hint)
-        if origin_geo and dest_geo:
-            route_city = city_hint or origin_geo.adcode or origin_geo.city
+        origin_geo = (
+            None
+            if args.origin_location
+            else amap_provider.geocode_detail(origin_name, city=city_hint)
+        )
+        dest_geo = (
+            None
+            if args.destination_location
+            else amap_provider.geocode_detail(destination_name, city=city_hint)
+        )
+        origin_location = args.origin_location or (
+            origin_geo.location if origin_geo else None
+        )
+        destination_location = args.destination_location or (
+            dest_geo.location if dest_geo else None
+        )
+        if origin_location and destination_location:
+            route_city = city_hint or (origin_geo.adcode if origin_geo else None) or (
+                origin_geo.city if origin_geo else None
+            )
             fact = amap_provider.route(
-                args.origin,
-                args.destination,
-                origin_geo.location,
-                dest_geo.location,
+                origin_name,
+                destination_name,
+                origin_location,
+                destination_location,
                 mode=args.mode,
                 city=route_city,
             )
         else:
             fact = RouteFact(
-                origin=args.origin,
-                destination=args.destination,
+                origin=origin_name,
+                destination=destination_name,
                 mode=args.mode,
                 distance_km=None,
                 duration_minutes=None,
@@ -397,8 +460,8 @@ def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN
         provider = "amap"
     else:
         fact = RouteFact(
-            origin=args.origin,
-            destination=args.destination,
+            origin=origin_name,
+            destination=destination_name,
             mode=args.mode,
             distance_km=None,
             duration_minutes=None,
@@ -415,8 +478,10 @@ def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN
         degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={
-            "origin": args.origin,
-            "destination": args.destination,
+            "origin": origin_name,
+            "destination": destination_name,
+            "origin_location": args.origin_location,
+            "destination_location": args.destination_location,
             "mode": args.mode,
             "city": city_hint,
         },
@@ -508,21 +573,6 @@ def _rail_list_summary(facts: list[RailFact]) -> list[dict]:
     return [_rail_summary(fact) for fact in facts]
 
 
-def _flight_summary(fact: FlightFact) -> dict:
-    return {
-        "status": fact.status,
-        "origin": fact.origin,
-        "destination": fact.destination,
-        "date": fact.date,
-        "flight_no": fact.flight_no,
-        "depart_time": fact.depart_time,
-        "arrive_time": fact.arrive_time,
-        "aircraft": fact.aircraft,
-        "ref_price": fact.ref_price,
-        "source": fact.source,
-    }
-
-
 def _guide_dict(guide: BookingEvidence) -> dict:
     return {
         "booking_type": guide.booking_type,
@@ -605,78 +655,5 @@ def _exec_rail(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
         "tool": tool_specs.TOOL_QUERY_RAIL,
         "status": "needs_official_confirmation",
         "note": "暂未获取到参考车次（社区 MCP 可能正在预热或不可用），请在 12306 官方 App 查询车次/席别/时刻并尽早购票或候补",
-        "official_entry": _guide_dict(guide),
-    }
-
-
-def _exec_flight(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
-    started = time.monotonic()
-    guide = entry_guides.flight_hotel_entry_guide(
-        origin=args.origin, destination=args.destination, date=args.date
-    )
-    fact = None
-    if flight_mcp_provider.is_enabled():
-        fact = flight_mcp_provider.query_flight_sync(
-            args.origin, args.destination, args.date
-        )
-    latency = int((time.monotonic() - started) * 1000)
-    if fact is not None:
-        _persist_log(
-            user_id,
-            request_id,
-            task_type,
-            tool_name="flight_query_mcp",
-            provider="flight_query_mcp",
-            status="ok",
-            degraded_to_b=False,
-            latency_ms=latency,
-            input_summary={
-                "origin": args.origin,
-                "destination": args.destination,
-                "date": args.date,
-            },
-            output_summary=_flight_summary(fact),
-            error_code=None,
-        )
-        return {
-            "tool": tool_specs.TOOL_QUERY_FLIGHTS,
-            "status": "ok",
-            "reference": True,
-            "origin": fact.origin,
-            "destination": fact.destination,
-            "date": fact.date,
-            "flight_no": fact.flight_no,
-            "depart_time": fact.depart_time,
-            "arrive_time": fact.arrive_time,
-            "aircraft": fact.aircraft,
-            "ref_price": fact.ref_price,
-            "source": "community_mcp",
-            "disclaimer": "参考级数据，以航司官方实时为准，票价/余票请在航司或官方平台确认",
-            "official_entry": _guide_dict(guide),
-        }
-    attempted = settings.TOOLS_ENABLED and settings.FLIGHT_MCP_ENABLED
-    _persist_log(
-        user_id,
-        request_id,
-        task_type,
-        tool_name=entry_guides.TOOL_FLIGHT_HOTEL,
-        provider="flight_query_mcp"
-        if attempted
-        else entry_guides.PROVIDER_FLIGHT_HOTEL,
-        status="needs_official_confirmation",
-        degraded_to_b=attempted,
-        latency_ms=latency,
-        input_summary={
-            "origin": args.origin,
-            "destination": args.destination,
-            "date": args.date,
-        },
-        output_summary=_booking_summary(guide),
-        error_code=None,
-    )
-    return {
-        "tool": tool_specs.TOOL_QUERY_FLIGHTS,
-        "status": "needs_official_confirmation",
-        "note": "暂未获取到参考航班（社区 MCP 可能正在预热或不可用），请在航司或携程等官方平台查询航班号/时刻/票价",
         "official_entry": _guide_dict(guide),
     }

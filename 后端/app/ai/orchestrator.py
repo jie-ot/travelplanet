@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections import Counter
 from collections.abc import Callable
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.ai import output_parser
 from app.ai.clients import vivo_chat_client, vivo_image_client
@@ -43,7 +45,7 @@ logger = logging.getLogger("travelplanet")
 
 # Planning function-calling loop bounds (defensive; tool execution is fast and
 # non-blocking, but the model must always converge to a final JSON answer).
-_MAX_TOOL_ROUNDS = 5
+_MAX_TOOL_ROUNDS = 8
 _MAX_TOOL_CALLS_TOTAL = 75
 _JSON_REPAIR_TIMEOUT_SECONDS = 60
 _PLAIN_FALLBACK_TIMEOUT_SECONDS = 90
@@ -848,7 +850,7 @@ def plan_itinerary(
     """Planning → full ItineraryData.
 
     With `execute_tool`, run a bounded function-calling loop so the model can
-    choose whitelist tools (高德 weather/POI/route, 12306 rail, flight) and
+    choose whitelist tools (高德 weather/POI/route and 12306 rail) and
     synthesize the itinerary from returned facts. The orchestrator intercepts
     each function call and routes it through the injected executor (which
     validates + executes via travel_fact_service). Falls back to the plain JSON
@@ -862,14 +864,7 @@ def plan_itinerary(
         fact_pack=fact_pack,
     )
     if execute_tool is not None:
-        try:
-            return _plan_with_tools(system_prompt, user_text, execute_tool)
-        except _PlanningFallbackExhausted:
-            raise
-        except AIGenerationError:
-            logger.info(
-                "planning function-calling path failed; falling back to plain JSON path"
-            )
+        return _plan_with_tools(system_prompt, user_text, execute_tool)
 
     return _plan_plain(system_prompt, user_text)
 
@@ -891,146 +886,555 @@ def _load_planning_system_prompt() -> str:
 def _plan_with_tools(
     system_prompt: str, user_text: str, execute_tool: ToolExecutor
 ) -> ItineraryData:
-    """Bounded function-calling loop; the model drives whitelist tool selection."""
+    """Research protocol: declare scope → gather/select facts → finish → final + audit."""
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_text},
     ]
-    total_calls = 0
+    scope: dict[str, Any] | None = None
+    research_summary: dict[str, Any] | None = None
+    fact_registry: dict[str, dict[str, Any]] = {}
+    retained_facts: dict[str, dict[str, Any]] = {}
+    result_cache: dict[str, dict[str, Any]] = {}
+    remaining_queries: list[str] = []
+    external_calls = 0
+
     for round_idx in range(_MAX_TOOL_ROUNDS):
-        log_event("planning_tool_round", round=round_idx + 1, total_calls=total_calls)
+        log_event(
+            "planning_tool_round",
+            round=round_idx + 1,
+            max_rounds=_MAX_TOOL_ROUNDS,
+            remaining_rounds_including_current=_MAX_TOOL_ROUNDS - round_idx,
+            total_calls=external_calls,
+            max_external_calls=_MAX_TOOL_CALLS_TOTAL,
+            message_count=len(messages),
+            scope_declared=scope is not None,
+            fact_registry_count=len(fact_registry),
+            retained_fact_count=len(retained_facts),
+            remaining_query_count=len(remaining_queries),
+            remaining_queries=remaining_queries,
+            cache_entry_count=len(result_cache),
+            research_finished=research_summary is not None,
+        )
         turn = vivo_chat_client.chat_messages(
             messages=messages,
             tools=tool_specs.PLANNING_TOOLS,
+            stage="planning_research",
             max_completion_tokens=16000,
         )
-        if turn.tool_calls:
-            remaining_calls = max(0, _MAX_TOOL_CALLS_TOTAL - total_calls)
-            executable_calls = turn.tool_calls[:remaining_calls]
-            skipped_calls = turn.tool_calls[remaining_calls:]
-            log_event(
-                "planning_tool_round_result",
-                status="tool_calls",
-                round=round_idx + 1,
-                tool_calls=len(turn.tool_calls),
-                executable_calls=len(executable_calls),
-                skipped_calls=len(skipped_calls),
-                assistant_content_excerpt=_excerpt(turn.content),
-            )
-            if not executable_calls:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "已达到本次规划的工具调用总上限，请停止调用工具，"
-                        "基于已有事实输出完整 ItineraryData JSON。",
-                    }
-                )
-                break
+        log_event(
+            "planning_tool_round_result",
+            status="tool_calls" if turn.tool_calls else "premature_content",
+            round=round_idx + 1,
+            remaining_rounds=_MAX_TOOL_ROUNDS - round_idx - 1,
+            tool_call_count=len(turn.tool_calls),
+            tool_names=[tc.name for tc in turn.tool_calls],
+            internal_tool_count=sum(
+                _planning_tool_kind(tc.name) == "internal" for tc in turn.tool_calls
+            ),
+            external_tool_count=sum(
+                tc.name in tool_specs.ARG_SCHEMAS for tc in turn.tool_calls
+            ),
+            content_chars=len(turn.content or ""),
+            content_excerpt=_excerpt(turn.content or ""),
+            scope_declared=scope is not None,
+            fact_registry_count=len(fact_registry),
+            retained_fact_count=len(retained_facts),
+            remaining_query_count=len(remaining_queries),
+        )
+        if not turn.tool_calls:
             messages.append(
                 {
                     "role": "assistant",
-                    "content": turn.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.name, "arguments": tc.arguments},
-                        }
-                        for tc in executable_calls
-                    ],
+                    "content": turn.content or "",
                 }
             )
-            for tc in executable_calls:
-                if total_calls >= _MAX_TOOL_CALLS_TOTAL:
-                    break
-                args = _safe_json_args(tc.arguments)
-                total_calls += 1
-                log_event(
-                    "planning_execute_tool",
-                    status="start",
-                    tool_name=tc.name,
-                    total_calls=total_calls,
-                )
-                result = execute_tool(tc.name, args)
-                log_event(
-                    "planning_execute_tool",
-                    status=result.get("status", "unknown"),
-                    tool_name=tc.name,
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    }
-                )
-            if skipped_calls:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"已达到工具调用总上限（{_MAX_TOOL_CALLS_TOTAL} 次），"
-                        "本轮剩余工具调用已截断；请基于已返回事实继续或输出最终 JSON。",
-                    }
-                )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "研究尚未通过 finish_research 结束，提前输出的行程不会被接受。"
+                        "请继续调用所需工具；信息足够后先调用 finish_research。"
+                    ),
+                }
+            )
             continue
-        # No (further) tool calls: this should be the final ItineraryData JSON.
-        if turn.content:
-            log_event(
-                "planning_tool_round_result",
-                status="final_content",
-                round=round_idx + 1,
-            )
-            log_event(
-                "planning_model_response_summary",
-                status="ready_to_parse",
-                path="function_calling",
-                content_chars=len(turn.content),
-                content_excerpt=_excerpt(turn.content),
-            )
-            try:
-                with timed_stage("planning_parse_model_json", path="function_calling"):
-                    return output_parser.parse_model_json(turn.content, ItineraryData)
-            except AIGenerationError as exc:
-                return _repair_tool_final_json(
-                    messages=messages,
-                    invalid_content=turn.content,
-                    parse_error=exc,
-                    execute_tool=execute_tool,
-                    total_calls=total_calls,
-                )
-        break
 
-    # Force a final tool-free answer (the model has all tool results by now).
-    messages.append(
-        {
-            "role": "user",
-            "content": "请基于以上对话与工具返回的事实，现在只输出完整的 ItineraryData JSON，"
-            "不要再调用任何工具，不要任何解释、Markdown 或代码块围栏。",
-        }
+        external_in_turn = any(
+            tc.name in tool_specs.ARG_SCHEMAS for tc in turn.tool_calls
+        )
+        messages.append(
+            {
+                "role": "assistant",
+                "content": turn.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": tc.arguments},
+                    }
+                    for tc in turn.tool_calls
+                ],
+            }
+        )
+        called_names: list[str] = []
+        for call_index, tc in enumerate(turn.tool_calls, start=1):
+            called_names.append(tc.name)
+            args = _safe_json_args(tc.arguments)
+            tool_kind = _planning_tool_kind(tc.name)
+            cache_hit = False
+            unknown_ids: list[str] = []
+            fact_ids_before = set(fact_registry)
+            log_event(
+                "planning_execute_tool",
+                status="start",
+                round=round_idx + 1,
+                call_index=call_index,
+                tool_name=tc.name,
+                tool_kind=tool_kind,
+                arguments=_summarize_planning_value(args),
+                external_calls_before=external_calls,
+                fact_registry_count=len(fact_registry),
+                retained_fact_count=len(retained_facts),
+            )
+            result: dict[str, Any]
+            if tc.name == tool_specs.TOOL_DECLARE_TRIP_SCOPE:
+                try:
+                    parsed_scope = tool_specs.DeclareTripScopeArgs.model_validate(args)
+                    scope = parsed_scope.model_dump(by_alias=True)
+                    result = {"tool": tc.name, "status": "ok", "saved": scope}
+                except ValidationError as exc:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": f"旅行范围参数不合法：{exc.errors()[:1]}",
+                    }
+            elif tc.name == tool_specs.TOOL_UPDATE_PLANNING_FACT_STATE:
+                try:
+                    state = tool_specs.PlanningFactStateArgs.model_validate(args)
+                    unknown_ids = [
+                        fact_id
+                        for fact_id in state.selected_fact_ids
+                        if fact_id not in fact_registry
+                    ]
+                    retained_facts = {
+                        fact_id: fact_registry[fact_id]
+                        for fact_id in state.selected_fact_ids
+                        if fact_id in fact_registry
+                    }
+                    remaining_queries = state.remaining_queries
+                    result = {
+                        "tool": tc.name,
+                        "status": "ok" if not unknown_ids else "partial",
+                        "retainedFactIds": list(retained_facts),
+                        "unknownFactIds": unknown_ids,
+                        "remainingQueries": remaining_queries,
+                    }
+                except ValidationError as exc:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": f"事实状态参数不合法：{exc.errors()[:1]}",
+                    }
+            elif tc.name == tool_specs.TOOL_FINISH_RESEARCH:
+                try:
+                    finish = tool_specs.FinishResearchArgs.model_validate(args)
+                    if scope is None:
+                        result = {
+                            "tool": tc.name,
+                            "status": "error",
+                            "message": "必须先调用 declare_trip_scope",
+                        }
+                    elif external_in_turn:
+                        result = {
+                            "tool": tc.name,
+                            "status": "error",
+                            "message": "本轮仍有外部查询；请读取结果后下一轮再结束研究",
+                        }
+                    else:
+                        research_summary = finish.model_dump()
+                        result = {
+                            "tool": tc.name,
+                            "status": "ok",
+                            "toolsClosed": True,
+                        }
+                except ValidationError as exc:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": f"研究总结参数不合法：{exc.errors()[:1]}",
+                    }
+            elif tc.name in tool_specs.ARG_SCHEMAS:
+                if external_calls >= _MAX_TOOL_CALLS_TOTAL:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": "已达到外部工具调用总上限",
+                    }
+                else:
+                    external_calls += 1
+                    cache_key = _planning_tool_cache_key(tc.name, args)
+                    cached = result_cache.get(cache_key)
+                    if cached is not None:
+                        cache_hit = True
+                        result = deepcopy(cached)
+                        result["cached"] = True
+                    else:
+                        result = execute_tool(tc.name, args)
+                        result = _register_planning_facts(
+                            tool_name=tc.name,
+                            arguments=args,
+                            result=result,
+                            registry=fact_registry,
+                        )
+                        result_cache[cache_key] = deepcopy(result)
+            else:
+                result = {
+                    "tool": tc.name,
+                    "status": "error",
+                    "message": "工具不在本轮规划白名单中",
+                }
+
+            issued_fact_ids = sorted(set(fact_registry) - fact_ids_before)
+            log_event(
+                "planning_execute_tool",
+                status=str(result.get("status") or "unknown"),
+                round=round_idx + 1,
+                call_index=call_index,
+                tool_name=tc.name,
+                tool_kind=tool_kind,
+                cache_hit=cache_hit,
+                result=_summarize_planning_value(result),
+                issued_fact_count=len(issued_fact_ids),
+                issued_fact_ids=issued_fact_ids,
+                external_calls=external_calls,
+                scope_summary=_summarize_planning_value(scope),
+                fact_registry_count=len(fact_registry),
+                retained_fact_count=len(retained_facts),
+                retained_fact_ids=list(retained_facts),
+                unknown_fact_ids=unknown_ids,
+                remaining_queries=remaining_queries,
+                research_finished=research_summary is not None,
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False),
+                }
+            )
+
+        if research_summary is not None:
+            break
+        remaining_rounds = _MAX_TOOL_ROUNDS - round_idx - 1
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"本轮已调用：{', '.join(called_names)}。"
+                    f"还剩 {remaining_rounds} 个研究轮次，已执行 {external_calls} 次外部调用。"
+                    "继续用 remainingQueries 驱动查询；不要提前输出最终行程。"
+                ),
+            }
+        )
+
+    if scope is None:
+        raise AIGenerationError("行程规划生成失败：模型未声明旅行范围")
+    if research_summary is None:
+        raise AIGenerationError("行程规划生成失败：模型未调用 finish_research")
+
+    if not retained_facts:
+        retained_facts = dict(fact_registry)
+    final_data = _generate_itinerary_from_research(
+        system_prompt=system_prompt,
+        user_text=user_text,
+        scope=scope,
+        retained_facts=retained_facts,
+        research_summary=research_summary,
+        stage="planning_final",
     )
+    audit = _audit_itinerary(
+        user_text=user_text,
+        scope=scope,
+        retained_facts=retained_facts,
+        itinerary=final_data,
+    )
+    if audit is None or audit.passed or not audit.missing_queries:
+        return final_data
+
+    added_facts = False
+    for query in audit.missing_queries[:8]:
+        if query.tool not in tool_specs.ARG_SCHEMAS:
+            continue
+        args = query.arguments
+        cache_key = _planning_tool_cache_key(query.tool, args)
+        cached = result_cache.get(cache_key)
+        if cached is None:
+            result = execute_tool(query.tool, args)
+            result = _register_planning_facts(
+                tool_name=query.tool,
+                arguments=args,
+                result=result,
+                registry=fact_registry,
+            )
+            result_cache[cache_key] = deepcopy(result)
+        before = len(retained_facts)
+        retained_facts.update(
+            {
+                fact_id: fact
+                for fact_id, fact in fact_registry.items()
+                if fact_id not in retained_facts
+            }
+        )
+        added_facts = added_facts or len(retained_facts) > before
+    if not added_facts:
+        return final_data
+    return _generate_itinerary_from_research(
+        system_prompt=system_prompt,
+        user_text=user_text,
+        scope=scope,
+        retained_facts=retained_facts,
+        research_summary={
+            **research_summary,
+            "reviewProblems": audit.problems,
+            "revision": "已完成最多一轮审稿补查，请修复问题并重新生成",
+        },
+        stage="planning_review_regeneration",
+    )
+
+
+class _AuditQuery(BaseModel):
+    tool: str
+    arguments: dict[str, Any]
+
+
+class _AuditResult(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    passed: bool
+    missing_queries: list[_AuditQuery] = Field(alias="missingQueries")
+    problems: list[str]
+
+
+def _planning_tool_cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
+    return f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+
+
+def _planning_tool_kind(tool_name: str) -> str:
+    if tool_name in {
+        tool_specs.TOOL_DECLARE_TRIP_SCOPE,
+        tool_specs.TOOL_UPDATE_PLANNING_FACT_STATE,
+        tool_specs.TOOL_FINISH_RESEARCH,
+    }:
+        return "internal"
+    if tool_name in tool_specs.ARG_SCHEMAS:
+        return "external"
+    return "unsupported"
+
+
+def _summarize_planning_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep diagnostic structure while bounding large model/tool payloads."""
+    if depth >= 5:
+        return "<max-depth>"
+    if isinstance(value, dict):
+        items = list(value.items())
+        summary = {
+            str(key): _summarize_planning_value(item, depth=depth + 1)
+            for key, item in items[:30]
+        }
+        if len(items) > 30:
+            summary["_omitted_key_count"] = len(items) - 30
+        return summary
+    if isinstance(value, list):
+        summary = [
+            _summarize_planning_value(item, depth=depth + 1)
+            for item in value[:12]
+        ]
+        if len(value) > 12:
+            summary.append({"_omitted_item_count": len(value) - 12})
+        return summary
+    if isinstance(value, str):
+        return value if len(value) <= 1200 else value[:1200] + "…"
+    return value
+
+
+def _fact_tool_counts(facts: dict[str, dict[str, Any]]) -> dict[str, int]:
+    return dict(
+        Counter(str(fact.get("tool") or "unknown") for fact in facts.values())
+    )
+
+
+def _new_fact_id(tool_name: str) -> str:
+    short = tool_name.removeprefix("amap_").removeprefix("query_")
+    return f"fact_{short}_{uuid.uuid4().hex[:12]}"
+
+
+def _register_planning_facts(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+    registry: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach request-unique IDs to every independently selectable fact."""
+    enriched = deepcopy(result)
+    list_keys = [
+        key for key in ("pois", "days", "candidates") if isinstance(enriched.get(key), list)
+    ]
+    result_context = {
+        key: deepcopy(value)
+        for key, value in enriched.items()
+        if key not in {*list_keys, "recommended"}
+    }
+    registered = False
+    for key in list_keys:
+        for item in enriched[key]:
+            if not isinstance(item, dict):
+                continue
+            fact_id = _new_fact_id(tool_name)
+            item["fact_id"] = fact_id
+            registry[fact_id] = {
+                "fact_id": fact_id,
+                "tool": tool_name,
+                "arguments": deepcopy(arguments),
+                "result_context": result_context,
+                **deepcopy(item),
+            }
+            registered = True
+    recommended = enriched.get("recommended")
+    if isinstance(recommended, dict):
+        fact_id = _new_fact_id(tool_name)
+        recommended["fact_id"] = fact_id
+        registry[fact_id] = {
+            "fact_id": fact_id,
+            "tool": tool_name,
+            "arguments": deepcopy(arguments),
+            "result_context": result_context,
+            **deepcopy(recommended),
+        }
+        registered = True
+    if not registered:
+        fact_id = _new_fact_id(tool_name)
+        enriched["fact_id"] = fact_id
+        registry[fact_id] = {
+            "fact_id": fact_id,
+            "tool": tool_name,
+            "arguments": deepcopy(arguments),
+            **deepcopy(enriched),
+        }
+    return enriched
+
+
+def _generate_itinerary_from_research(
+    *,
+    system_prompt: str,
+    user_text: str,
+    scope: dict[str, Any],
+    retained_facts: dict[str, dict[str, Any]],
+    research_summary: dict[str, Any],
+    stage: str,
+) -> ItineraryData:
+    compact_user = (
+        f"{user_text}\n\n【模型已声明的旅行范围】\n"
+        f"{json.dumps(scope, ensure_ascii=False)}\n\n【保留的完整工具事实】\n"
+        f"{json.dumps(list(retained_facts.values()), ensure_ascii=False)}\n\n"
+        f"【研究结束摘要】\n{json.dumps(research_summary, ensure_ascii=False)}\n\n"
+        "工具已关闭。现在只输出完整 ItineraryData JSON。新增字段可选；使用事实的日程必须填写"
+        " fact_refs，只有 status=ok 的高德事实可标 verified，铁路参考事实标 reference。"
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": compact_user},
+    ]
     final = vivo_chat_client.chat_messages(
-        messages=messages, tools=None, max_completion_tokens=16000
+        messages=messages,
+        tools=None,
+        stage=stage,
+        temperature=0.2,
+        max_completion_tokens=16000,
     )
     if final.content:
         log_event(
             "planning_model_response_summary",
             status="ready_to_parse",
-            path="forced_final",
+            path="research_final",
+            generation_stage=stage,
             content_chars=len(final.content),
             content_excerpt=_excerpt(final.content),
+            scope=_summarize_planning_value(scope),
+            retained_fact_count=len(retained_facts),
+            retained_fact_ids=list(retained_facts),
+            retained_fact_tool_counts=_fact_tool_counts(retained_facts),
+            research_summary=_summarize_planning_value(research_summary),
         )
         try:
-            with timed_stage("planning_parse_model_json", path="forced_final"):
+            with timed_stage("planning_parse_model_json", path="research_final"):
                 return output_parser.parse_model_json(final.content, ItineraryData)
         except AIGenerationError as exc:
-            return _repair_tool_final_json(
-                messages=messages,
-                invalid_content=final.content,
-                parse_error=exc,
-                execute_tool=execute_tool,
-                total_calls=total_calls,
+            messages.extend(
+                [
+                    {"role": "assistant", "content": final.content},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"上一次 JSON 未通过校验：{exc}。只修复结构并输出完整合法 JSON，"
+                            "不得调用工具或添加解释。"
+                        ),
+                    },
+                ]
             )
+            repaired = vivo_chat_client.chat_messages(
+                messages=messages,
+                tools=None,
+                stage="planning_final_repair",
+                temperature=0.1,
+                max_completion_tokens=16000,
+            )
+            if repaired.content:
+                return output_parser.parse_model_json(repaired.content, ItineraryData)
     raise AIGenerationError("行程规划生成失败：模型未返回合法 JSON")
+
+
+def _audit_itinerary(
+    *,
+    user_text: str,
+    scope: dict[str, Any],
+    retained_facts: dict[str, dict[str, Any]],
+    itinerary: ItineraryData,
+) -> _AuditResult | None:
+    audit_prompt = (
+        "你是同一旅行规划模型的低温审稿阶段。只检查需求覆盖、跨区通勤依据、关键路线、"
+        "天气与预约事实引用。若缺事实，只能从 amap_weather_range、amap_poi_search、"
+        "amap_poi_around、amap_route、query_rail_tickets 中提出最多 8 个 missingQueries。"
+        "只输出 JSON：{\"passed\":boolean,\"missingQueries\":[{\"tool\":\"...\","
+        "\"arguments\":{}}],\"problems\":[\"...\"]}。"
+    )
+    audit_input = {
+        "originalRequest": user_text,
+        "declareTripScope": scope,
+        "retainedFacts": list(retained_facts.values()),
+        "itinerary": itinerary.model_dump(by_alias=True),
+    }
+    try:
+        turn = vivo_chat_client.chat_messages(
+            messages=[
+                {"role": "system", "content": audit_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(audit_input, ensure_ascii=False),
+                },
+            ],
+            tools=None,
+            stage="planning_audit",
+            temperature=0.1,
+            max_completion_tokens=3000,
+        )
+        if not turn.content:
+            return None
+        return output_parser.parse_model_json(turn.content, _AuditResult)
+    except AIGenerationError:
+        logger.warning("planning audit returned invalid JSON; keeping validated itinerary")
+        return None
 
 
 def _repair_tool_final_json(

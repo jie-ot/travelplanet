@@ -5,6 +5,7 @@ import { AppFrame } from '@/components/shared/app-frame'
 import { AppProvider } from '@/components/shared/app-context'
 import { MobileShell } from '@/components/shared/mobile-shell'
 import './globals.css'
+import './experience-refined.css'
 
 const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] })
 const geistMono = Geist_Mono({

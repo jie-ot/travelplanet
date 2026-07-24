@@ -8,7 +8,9 @@ schemas and embedded inside the `Plan` DTO.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TripInfo(BaseModel):
@@ -28,6 +30,11 @@ class Booking(BaseModel):
     details: str
 
 
+class ScheduleAction(BaseModel):
+    type: Literal["map", "booking", "details", "alternative", "complete"]
+    label: str
+
+
 class Schedule(BaseModel):
     id: str
     time_period: str
@@ -36,6 +43,17 @@ class Schedule(BaseModel):
     activity: str
     transport: str | None = None
     note: str | None = None
+    place_name: str | None = None
+    location: str | None = None
+    duration_minutes: int | None = None
+    travel_minutes: int | None = None
+    distance_km: float | None = None
+    transport_mode: Literal["driving", "transit", "walking", "bicycling"] | None = None
+    tags: list[str] = Field(default_factory=list)
+    booking_required: bool = False
+    fact_status: Literal["verified", "reference", "unverified"] | None = None
+    fact_refs: list[str] = Field(default_factory=list)
+    action: ScheduleAction | None = None
 
 
 class DailyItinerary(BaseModel):
@@ -45,9 +63,26 @@ class DailyItinerary(BaseModel):
     schedules: list[Schedule]
 
 
+class ExperienceSummary(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+        serialize_by_alias=True,
+    )
+
+    trip_theme: str = Field(default="", alias="tripTheme")
+    pace: str = ""
+    intensity: int = 50
+    highlights: list[str] = Field(default_factory=list)
+    weather_summary: str = Field(default="", alias="weatherSummary")
+    personalization_tags: list[str] = Field(
+        default_factory=list, alias="personalizationTags"
+    )
+
+
 class ItineraryData(BaseModel):
     trip_info: TripInfo
     preparations: list[Preparation]
     bookings: list[Booking]
     food_recommendations: list[str]
     itinerary: list[DailyItinerary]
+    experience_summary: ExperienceSummary | None = None
