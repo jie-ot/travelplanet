@@ -78,6 +78,15 @@ export interface GenerateArtifactsInput {
   options: { generatePostcards: boolean; generateReport: boolean }
 }
 
+export type GenerationPhase = "preparing" | "uploading" | "creating"
+
+export interface GenerationProgress {
+  phase: GenerationPhase
+  completed: number
+  total: number
+  options: GenerateArtifactsInput["options"]
+}
+
 /* ---------------- 多图上传：并发限流 + 单张重试 ---------------- */
 // 同时在传的最大张数：贴合浏览器单域名约 6 个并发连接的上限，避免瞬时请求过多互相拖累
 const UPLOAD_CONCURRENCY = 5
@@ -111,13 +120,19 @@ async function uploadPhotoWithRetry(file: File): Promise<UploadedPhoto> {
  * 在并发上限内并行上传全部照片，结果保持与输入顺序一致。
  * 全有全无：任一张重试后仍失败即整体抛错，绝不静默丢图（保证「选了什么就用什么」）。
  */
-async function uploadAllPhotos(files: File[]): Promise<UploadedPhoto[]> {
+async function uploadAllPhotos(
+  files: File[],
+  onProgress?: (completed: number, total: number) => void,
+): Promise<UploadedPhoto[]> {
   const results = new Array<UploadedPhoto>(files.length)
   let cursor = 0
+  let completed = 0
   const worker = async () => {
     while (cursor < files.length) {
       const index = cursor++
       results[index] = await uploadPhotoWithRetry(files[index])
+      completed += 1
+      onProgress?.(completed, files.length)
     }
   }
   const workerCount = Math.min(UPLOAD_CONCURRENCY, files.length)
@@ -142,6 +157,7 @@ interface AppContextValue {
   prependReport: (report: Report) => void
   // 首页生成流程
   generating: boolean
+  generationProgress: GenerationProgress | null
   generateArtifacts: (input: GenerateArtifactsInput) => Promise<GenerateResult | null>
   // 旅行规划草稿（本地单一数据源，规范 §10）
   draftItineraryData: ItineraryData | null
@@ -179,6 +195,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [plans, setPlans] = useState<Plan[]>([])
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [generating, setGenerating] = useState(false)
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgress | null>(null)
   const [draftItineraryData, setDraftItineraryData] = useState<ItineraryData | null>(null)
   const [editingPlanId, setEditingPlanId] = useState<string | null>(null)
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState(false)
@@ -373,11 +390,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const generateArtifacts = useCallback(
     async ({ files, requirements, options }: GenerateArtifactsInput): Promise<GenerateResult | null> => {
       setGenerating(true)
+      setGenerationProgress({
+        phase: "preparing",
+        completed: 0,
+        total: files.length,
+        options,
+      })
       try {
         // 每张照片：读 EXIF（失败置 null，不报错）→ 上传 → 拼装 UploadedPhoto
         // 上传走并发限流 + 单张重试（详见 uploadAllPhotos），支持一次最多 50 张且更抗抖动
-        const photos = await uploadAllPhotos(files)
+        setGenerationProgress({
+          phase: "uploading",
+          completed: 0,
+          total: files.length,
+          options,
+        })
+        const photos = await uploadAllPhotos(files, (completed, total) => {
+          setGenerationProgress({
+            phase: "uploading",
+            completed,
+            total,
+            options,
+          })
+        })
 
+        setGenerationProgress({
+          phase: "creating",
+          completed: files.length,
+          total: files.length,
+          options,
+        })
         const result = await generateTravelArtifacts({ photos, requirements, options })
         // 固定返回 { postcardGroup, report }；通过 if 判断追加，不依赖字段缺失
         if (result.postcardGroup) setPostcardGroups((g) => [result.postcardGroup as PostcardGroup, ...g])
@@ -388,6 +430,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return null
       } finally {
         setGenerating(false)
+        setGenerationProgress(null)
       }
     },
     [toastError],
@@ -501,6 +544,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       prependPostcardGroup,
       prependReport,
       generating,
+      generationProgress,
       generateArtifacts,
       draftItineraryData,
       editingPlanId,
@@ -537,6 +581,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       prependPostcardGroup,
       prependReport,
       generating,
+      generationProgress,
       generateArtifacts,
       draftItineraryData,
       editingPlanId,

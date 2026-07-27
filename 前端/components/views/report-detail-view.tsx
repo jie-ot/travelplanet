@@ -119,6 +119,11 @@ export function ReportDetailView() {
       </button>
 
       <header className="persona-editorial-header">
+        <div className="persona-editorial-motes" aria-hidden>
+          <span />
+          <span />
+          <span />
+        </div>
         <p className="persona-editorial-kicker">TRAVEL PERSONA · 旅行人格</p>
         <div className="persona-editorial-meta">
           <span><MapPin aria-hidden />{report.location}</span>
