@@ -463,11 +463,17 @@
 /* Personality report — editorial reader rebuilt for breathing room and legibility. */
 .persona-editorial-report {
   position: relative;
+  flex: none;
+  height: 100vh;
   height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  overscroll-behavior-y: contain;
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   color: var(--profile-ink);
   background:
     linear-gradient(90deg, transparent 0 1.05rem, color-mix(in srgb, var(--profile-accent) 10%, transparent) 1.05rem 1.1rem, transparent 1.1rem),
@@ -517,6 +523,7 @@
 
 .persona-editorial-header {
   position: relative;
+  flex: none;
   min-height: 11.75rem;
   padding: max(4.15rem, calc(env(safe-area-inset-top) + 3.2rem)) 1.25rem 1.2rem;
   overflow: hidden;
@@ -608,14 +615,17 @@
 }
 
 .persona-editorial-meta {
-  display: flex;
-  max-width: calc(100% - 2rem);
+  display: grid;
+  width: 100%;
+  max-width: 22rem;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: .55rem;
+  gap: .42rem;
   color: var(--profile-muted);
-  font-size: .875rem;
+  font-family: var(--font-soft-family);
+  font-size: .8125rem;
   font-weight: 650;
-  line-height: 1.35;
+  line-height: 1.42;
 }
 
 .persona-editorial-meta span {
@@ -626,8 +636,11 @@
 }
 
 .persona-editorial-meta span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+}
+
+.persona-editorial-meta span:last-child {
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -651,7 +664,7 @@
   max-width: 21rem;
   margin: .45rem 0 0;
   color: var(--profile-ink);
-  font-family: var(--font-editorial);
+  font-family: var(--font-rounded-family);
   font-size: clamp(2rem, 9vw, 2.55rem);
   font-weight: 900;
   line-height: 1.08;
@@ -690,10 +703,14 @@
   display: flex;
   width: 100%;
   box-sizing: border-box;
+  flex: none;
   flex-direction: column;
   gap: 0;
   overflow: visible;
   padding: 0 1rem max(2.4rem, calc(env(safe-area-inset-bottom) + 1.5rem));
+  font-family: var(--font-soft-family);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .persona-editorial-content .persona-radar-section {
@@ -726,8 +743,8 @@
 }
 
 .persona-editorial-content .persona-section-heading h2 {
-  font-family: var(--font-editorial);
-  font-size: 1.125rem;
+  font-family: var(--font-rounded-family);
+  font-size: 1.0625rem;
   letter-spacing: .01em;
 }
 
@@ -817,8 +834,8 @@
 .persona-editorial-content .persona-legacy-copy.is-dense h3 {
   margin: .2rem 0 .95rem;
   color: var(--profile-ink);
-  font-family: var(--font-editorial);
-  font-size: 1.35rem;
+  font-family: var(--font-rounded-family);
+  font-size: 1.2rem;
   font-weight: 850;
   line-height: 1.38;
   letter-spacing: -.02em;
@@ -829,12 +846,11 @@
 .persona-editorial-content .persona-legacy-copy.is-dense p {
   margin: 0 0 1rem;
   color: color-mix(in srgb, var(--profile-ink) 76%, var(--profile-muted));
-  font-size: 1.03125rem;
+  font-size: .9375rem;
   font-weight: 480;
-  line-height: 1.78;
+  line-height: 1.72;
   letter-spacing: .008em;
-  text-align: justify;
-  text-justify: inter-ideograph;
+  text-align: left;
 }
 
 .persona-editorial-content .persona-legacy-copy .legacy-lead {
@@ -842,8 +858,8 @@
   margin: .08rem 0 1.15rem;
   padding: .05rem 0 .15rem 1rem;
   color: var(--profile-ink);
-  font-family: var(--font-editorial);
-  font-size: 1.12rem;
+  font-family: var(--font-soft-family);
+  font-size: 1rem;
   font-weight: 700;
   line-height: 1.7;
   text-align: left;
@@ -864,7 +880,7 @@
   margin: .25rem 0 0;
   padding: .85rem .95rem;
   color: var(--profile-ink);
-  font-size: .97rem;
+  font-size: .9rem;
   font-weight: 650;
   line-height: 1.65;
   text-align: left;
@@ -887,8 +903,8 @@
 }
 
 .persona-editorial-content.has-profile .persona-narrative-intro {
-  font-size: 1.0625rem;
-  line-height: 1.7;
+  font-size: .9375rem;
+  line-height: 1.72;
 }
 
 .persona-editorial-content.has-profile .persona-moment {
@@ -898,8 +914,8 @@
 .persona-editorial-content.has-profile .persona-moment p,
 .persona-editorial-content.has-profile .persona-verdict,
 .persona-editorial-content.has-profile .persona-slogan {
-  font-size: 1rem;
-  line-height: 1.65;
+  font-size: .9rem;
+  line-height: 1.68;
 }
 
 .persona-editorial-content.has-profile .persona-spectrum-section {
@@ -961,6 +977,7 @@
 /* Itinerary — compact active-day reader */
 .itinerary-experience {
   min-height: 100%;
+  font-family: var(--font-soft-family);
   color: #153846;
   background:
     radial-gradient(circle at 90% 4%, color-mix(in srgb, var(--trip-accent) 16%, transparent), transparent 18rem),
@@ -969,7 +986,7 @@
 
 .itinerary-hero,
 .itinerary-hero-content {
-  min-height: 8.6rem;
+  min-height: 5.9rem;
 }
 
 .itinerary-hero {
@@ -998,25 +1015,18 @@
 
 .itinerary-hero-content {
   justify-content: flex-end;
-  padding: 1rem 1.15rem 1.15rem;
+  padding: .82rem 1.15rem .9rem;
 }
 
 .itinerary-destination {
-  font-size: .9375rem;
+  font-size: .84375rem;
   letter-spacing: .025em;
 }
 
-.itinerary-hero h1 {
-  max-width: 24rem;
-  margin-top: .4rem;
-  font-size: clamp(1.7rem, 7vw, 2.15rem);
-  line-height: 1.08;
-}
-
 .itinerary-date {
-  margin-top: .5rem;
+  margin-top: .38rem;
   color: rgb(255 255 255 / .78);
-  font-size: .9375rem;
+  font-size: .84375rem;
 }
 
 .itinerary-front-guides {
@@ -1042,12 +1052,13 @@
 }
 
 .itinerary-command-toggle strong {
-  font-size: 1.0625rem;
+  font-family: var(--font-rounded-family);
+  font-size: .9375rem;
 }
 
 .itinerary-command-toggle small {
   margin-top: .05rem;
-  font-size: .875rem;
+  font-size: .75rem;
 }
 
 .itinerary-command-content {
@@ -1063,7 +1074,7 @@
 .itinerary-command-content strong,
 .itinerary-command-content span,
 .itinerary-command-content > .itinerary-food-list span {
-  font-size: 1rem;
+  font-size: .875rem;
   line-height: 1.55;
 }
 
@@ -1088,15 +1099,15 @@
 }
 
 .itinerary-day-nav button span {
-  font-size: .875rem;
+  font-size: .75rem;
 }
 
 .itinerary-day-nav button strong {
-  font-size: .875rem;
+  font-size: .75rem;
 }
 
 .itinerary-day-nav button small {
-  font-size: .8125rem;
+  font-size: .71875rem;
 }
 
 .itinerary-day-nav button.is-active {
@@ -1135,16 +1146,17 @@
 .itinerary-day-heading > span {
   min-width: 2.35rem;
   height: 2.35rem;
-  font-size: .875rem;
+  font-size: .75rem;
 }
 
 .itinerary-day-heading p {
-  font-size: .8125rem;
+  font-size: .71875rem;
 }
 
 .itinerary-day-heading h2 {
   margin-top: .08rem;
-  font-size: 1.125rem;
+  font-family: var(--font-rounded-family);
+  font-size: 1rem;
 }
 
 .itinerary-light-route {
@@ -1193,16 +1205,16 @@
 
 .itinerary-card-meta time {
   gap: .34rem;
-  font-size: .9375rem;
+  font-size: .8125rem;
 }
 
 .itinerary-card-meta time span {
   padding: .18rem .4rem;
-  font-size: .875rem;
+  font-size: .75rem;
 }
 
 .itinerary-card-meta > span {
-  font-size: .8125rem;
+  font-size: .71875rem;
 }
 
 .itinerary-card h3 {
@@ -1210,14 +1222,15 @@
   align-self: center;
   gap: .42rem;
   margin-top: .42rem;
-  font-size: 1rem;
+  font-family: var(--font-rounded-family);
+  font-size: .90625rem;
   line-height: 1.42;
 }
 
 .itinerary-activity {
   grid-column: 1 / -1;
   margin-top: .32rem;
-  font-size: .9375rem;
+  font-size: .84375rem;
   line-height: 1.55;
 }
 
@@ -1229,7 +1242,7 @@
 
 .itinerary-tags span {
   padding: .24rem .45rem;
-  font-size: .8125rem;
+  font-size: .75rem;
 }
 
 .itinerary-card-details {
@@ -1240,7 +1253,7 @@
 }
 
 .itinerary-card-details p {
-  font-size: 1rem;
+  font-size: .875rem;
   line-height: 1.58;
 }
 
@@ -1256,7 +1269,7 @@
 .itinerary-card-actions button {
   min-height: 2.65rem;
   padding: .45rem .7rem;
-  font-size: .9375rem;
+  font-size: .8125rem;
   border-radius: .72rem;
 }
 

@@ -194,7 +194,6 @@ export function HomeView() {
         <button type="button" onClick={() => navigate({ page: "postcards" })} aria-label="查看明信片">
           <span className={styles.entryCopy}>
             <strong>查看明信片<em>✦</em></strong>
-            <small>把照片变成旅行明信片</small>
           </span>
           <span className={styles.stitchLine} aria-hidden />
           <span className={styles.arrowStamp} aria-hidden>

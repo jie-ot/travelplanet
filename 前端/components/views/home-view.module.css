@@ -4,6 +4,9 @@
   --teal: #078fab;
   --orange: #e87955;
   --paper: #f6f1e8;
+  --home-font-display: 'Microsoft YaHei UI', 'HarmonyOS Sans SC', 'MiSans', 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif;
+  --home-font-nav: 'Noto Sans CJK SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+  --home-font-meta: 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif;
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -286,7 +289,7 @@
 
 .heroCopy p {
   margin: 0;
-  font-family: var(--font-editorial-family);
+  font-family: var(--home-font-meta);
   font-size: clamp(10px, 3.05vw, 13.5px);
   font-weight: 500;
   line-height: 1.62;
@@ -545,7 +548,7 @@
 
 .entryCopy strong {
   display: block;
-  font-family: var(--font-editorial-family);
+  font-family: var(--home-font-display);
   font-size: clamp(26px, 8.2vw, 36px);
   font-weight: 900;
   line-height: 1;
@@ -590,7 +593,8 @@
   position: absolute;
   z-index: 1;
   top: 13%;
-  right: 22.2%;
+  right: auto;
+  left: 57%;
   display: grid;
   width: clamp(58px, 15.8vw, 68px);
   aspect-ratio: 1;
@@ -627,7 +631,7 @@
   min-height: 0;
   grid-template-columns: 1fr 1fr;
   padding: 0 5%;
-  transform: translateY(-10px);
+  transform: translateY(-14px);
 }
 
 .shortcutRoute {
@@ -663,8 +667,10 @@
   display: grid;
   min-width: 0;
   height: 100%;
-  grid-template-columns: 1fr auto;
-  grid-template-rows: 50% 50%;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 9px;
   border: 0;
   color: var(--navy);
   background: transparent;
@@ -677,7 +683,7 @@
   display: grid;
   width: clamp(52px, 14vw, 61px);
   aspect-ratio: 1;
-  align-self: end;
+  align-self: center;
   justify-self: center;
   place-items: center;
   border: clamp(2px, 0.55vw, 3px) solid var(--teal);
@@ -685,7 +691,7 @@
   color: white;
   background: var(--teal);
   box-shadow: inset 0 0 0 4px var(--paper), inset 0 0 0 6px var(--teal), 0 2px 3px rgb(21 52 61 / 0.18);
-  transform: translate(-10px, 8px);
+  transform: none;
   transition: scale 100ms ease-out, filter 180ms ease-out, box-shadow 180ms ease-out;
 }
 
@@ -717,39 +723,40 @@
 .coral .shortcutIcon::after { color: #ed733d; }
 
 .shortcutLabel {
-  grid-column: 1 / 3;
-  align-self: start;
+  grid-column: 1;
+  align-self: center;
   justify-self: center;
-  padding-top: 8%;
+  padding-top: 0;
   text-align: center;
-  transform: translateX(-5px);
+  transform: none;
   transition: opacity 140ms ease-out;
 }
 
 .shortcutLabel strong {
   display: block;
-  font-family: var(--font-editorial-family);
-  font-size: clamp(16px, 4.5vw, 20px);
-  font-weight: 900;
-  line-height: 1;
-  letter-spacing: 0.03em;
+  font-family: var(--home-font-nav);
+  font-size: clamp(15px, 4.2vw, 18px);
+  font-weight: 800;
+  line-height: 1.06;
+  letter-spacing: 0.015em;
   white-space: nowrap;
 }
 
 .shortcutLabel small {
   display: block;
-  margin-top: 4px;
+  margin-top: 5px;
   color: #71818c;
-  font-family: var(--font-editorial-family);
-  font-size: clamp(11px, 3.2vw, 14px);
+  font-family: var(--home-font-meta);
+  font-size: clamp(11px, 3vw, 13px);
   font-weight: 600;
-  line-height: 1;
+  line-height: 1.08;
+  letter-spacing: 0.01em;
   white-space: nowrap;
 }
 
 .shortcut > svg {
   position: absolute;
-  bottom: 20%;
+  bottom: 13%;
   width: clamp(15px, 4.6vw, 21px);
   color: var(--teal);
   stroke-width: 3;
@@ -757,10 +764,15 @@
 
 .reportShortcut > svg { right: 15%; }
 .planningShortcut > svg { right: 20%; }
-.reportShortcut .shortcutIcon { transform: translate(-6px, 8px); }
-.reportShortcut .shortcutLabel { transform: translateX(-1px); }
-.planningShortcut .shortcutIcon { transform: translate(-13px, 8px); }
-.planningShortcut .shortcutLabel { transform: translateX(-8px); }
+.reportShortcut .shortcutIcon,
+.planningShortcut .shortcutIcon {
+  transform: none;
+}
+
+.reportShortcut .shortcutLabel,
+.planningShortcut .shortcutLabel {
+  transform: none;
+}
 
 .latestSlot {
   position: relative;
@@ -769,7 +781,7 @@
   min-height: 0;
   align-items: center;
   padding: 0 5.5%;
-  transform: translateY(-10px);
+  transform: translateY(-14px);
 }
 
 .latestTicket {
@@ -825,7 +837,7 @@
   align-items: center;
   gap: 4px;
   color: var(--orange);
-  font-family: var(--font-editorial-family);
+  font-family: var(--home-font-nav);
   font-size: clamp(8px, 2.55vw, 11px);
   font-weight: 800;
   line-height: 1;
@@ -838,9 +850,9 @@
   display: block;
   margin-top: clamp(5px, 0.9dvh, 8px);
   overflow: hidden;
-  font-family: var(--font-editorial-family);
+  font-family: var(--home-font-display);
   font-size: clamp(17px, 5.4vw, 24px);
-  font-weight: 900;
+  font-weight: 800;
   line-height: 1;
   letter-spacing: 0.02em;
   text-overflow: ellipsis;
@@ -852,7 +864,7 @@
   margin-top: 5px;
   overflow: hidden;
   color: #73818b;
-  font-family: var(--font-editorial-family);
+  font-family: var(--home-font-meta);
   font-size: clamp(9px, 2.8vw, 12.5px);
   font-weight: 600;
   line-height: 1;
@@ -928,22 +940,23 @@
   position: relative;
   z-index: 2;
   display: flex;
-  height: 40px;
+  height: 35px;
   align-items: center;
   gap: 4%;
 }
 
 .toggle {
+  box-sizing: border-box;
   display: flex;
-  height: 40px;
+  height: 34px;
   align-items: center;
   gap: 5px;
   border: 0;
   border-radius: 999px;
-  padding: 0 10px;
+  padding: 0 8px;
   color: #70818d;
-  font-family: var(--font-editorial-family);
-  font-size: clamp(11.5px, 3.1vw, 13px);
+  font-family: var(--home-font-nav);
+  font-size: clamp(11.5px, 3vw, 12.5px);
   font-weight: 700;
   white-space: nowrap;
   background: #e8ecee;
@@ -952,15 +965,22 @@
 }
 
 .toggle > span {
+  box-sizing: border-box;
   display: grid;
-  width: clamp(15px, 4vw, 17px);
-  aspect-ratio: 1;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   place-items: center;
   border: 1.5px solid #91a0a9;
   border-radius: 50%;
 }
 
-.toggle > span svg { width: 65%; stroke-width: 3.2; }
+.toggle > span svg {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  stroke-width: 3;
+}
 
 .toggleActive {
   color: white;
@@ -1010,7 +1030,7 @@
   border-radius: 999px;
   padding: clamp(9px, 1.1dvh, 11px) 7%;
   color: var(--navy);
-  font-family: var(--font-editorial-family);
+  font-family: var(--home-font-meta);
   font-size: clamp(12.5px, 3.35vw, 14.5px);
   font-weight: 600;
   line-height: 1.35;
@@ -1298,16 +1318,20 @@
 .home button:active { transform: none; }
 .postcardEntry > button:active .arrowStamp,
 .shortcut:active .shortcutIcon svg {
-  scale: .94;
+  scale: .98;
 }
-.shortcut:active .shortcutIcon { filter: saturate(1.05) brightness(.96); }
-.shortcut:active .shortcutLabel { opacity: .72; }
-.toggle:active,
+.shortcut:active .shortcutIcon { filter: saturate(1.025) brightness(.975); }
+.shortcut:active .shortcutLabel { opacity: .88; }
 .uploadButton:active,
 .sendButton:active,
 .photoTray figure > button:active {
-  scale: .96;
-  filter: brightness(.95);
+  scale: .985;
+  filter: brightness(.97);
+}
+
+.toggle:active {
+  scale: 1;
+  filter: brightness(.975);
 }
 
 @media (max-height: 760px) {
@@ -1319,12 +1343,12 @@
   .postcardLake { top: 4%; height: 56%; }
   .entryCopy strong { font-size: min(7.5vw, 29px); }
   .arrowStamp { top: 15%; width: min(15vw, 56px); }
-  .shortcutLabel { padding-top: 5%; transform: translateX(-8px); }
-  .shortcutIcon { width: min(12.8vw, 50px); transform: translate(-8px, 4px); }
+  .shortcutLabel { padding-top: 0; transform: none; }
+  .shortcutIcon { width: min(12.8vw, 50px); transform: none; }
   .shortcutLabel small { margin-top: 3px; }
   .latestTicket { min-height: 58px; }
   .envelope { height: 102px; min-height: 102px; padding-top: 7px; }
-  .toggleRow { height: 39px; }
+  .toggleRow { height: 35px; }
   .inputRow { min-height: 44px; margin-top: 3px; }
 }
 
@@ -1342,12 +1366,12 @@
   .entryCopy strong { font-size: 32px; }
   .entryCopy small { margin-top: 3px; font-size: 12px; transform: translateY(-2px); }
   .arrowStamp { top: 18%; width: 61px; }
-  .shortcuts { padding-inline: 6%; transform: none; }
+  .shortcuts { padding-inline: 6%; transform: translateY(-8px); }
   .shortcutIcon { width: 54px; }
-  .shortcutLabel { padding-top: 6%; }
+  .shortcutLabel { padding-top: 0; }
   .shortcutLabel strong { font-size: 18px; }
   .shortcutLabel small { margin-top: 5px; font-size: 12.5px; }
-  .latestSlot { padding-inline: 6%; transform: translateY(-4px); }
+  .latestSlot { padding-inline: 6%; transform: translateY(-8px); }
   .latestTicket { min-height: 68px; }
   .latestTicket > img { width: 62px; }
   .latestText strong { font-size: 21px; }
@@ -1365,13 +1389,14 @@
   flex-direction: column;
   justify-content: center;
   gap: clamp(6px, .8dvh, 9px);
-  transform: none;
+  transform: translateY(-4px);
 }
 
 .entryCopy strong {
   font-size: clamp(28px, 7.8vw, 33px);
   line-height: 1.08;
-  letter-spacing: -.045em;
+  font-weight: 800;
+  letter-spacing: -.032em;
 }
 
 .entryCopy small {
@@ -1383,8 +1408,9 @@
 }
 
 .stitchLine {
-  bottom: 10%;
+  bottom: 22%;
   width: min(51%, 202px);
+  transform: translateY(-4px);
 }
 
 .arrowStamp {
@@ -1392,6 +1418,11 @@
 }
 
 @media (min-width: 400px) {
+  .entryCopy,
+  .stitchLine {
+    transform: translateY(-12px);
+  }
+
   .entryCopy strong {
     font-size: 33px;
   }

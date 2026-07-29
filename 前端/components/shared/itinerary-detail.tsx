@@ -36,7 +36,6 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
   const [expandedSchedules, setExpandedSchedules] = useState<Set<string>>(() => new Set())
   const [bookingOpen, setBookingOpen] = useState(false)
   const [foodOpen, setFoodOpen] = useState(false)
-  const summary = data.experience_summary
   const mood = destinationMood(trip_info.destination)
   const activeDayIndex = Math.max(
     0,
@@ -63,7 +62,6 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
             <MapPin className="size-3.5" aria-hidden />
             {trip_info.destination}
           </p>
-          <h1>{summary?.tripTheme || `${trip_info.destination}沉浸之旅`}</h1>
           <p className="itinerary-date">
             <CalendarDays className="size-4" aria-hidden />
             {trip_info.date_label} · {itinerary.length} 天
