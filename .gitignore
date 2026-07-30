@@ -21,6 +21,28 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Capacitor / Android local and generated files
+/前端/android/.gradle/
+/前端/android/**/build/
+/前端/android/local.properties
+/前端/android/captures/
+/前端/android/.externalNativeBuild/
+/前端/android/.cxx/
+/前端/android/capacitor-cordova-android-plugins/
+/前端/android/app/src/main/assets/public/
+/前端/android/app/src/main/assets/capacitor.config.json
+/前端/android/app/src/main/assets/capacitor.plugins.json
+/前端/android/app/src/main/res/xml/config.xml
+*.jks
+*.keystore
+keystore.properties
+google-services.json
+
+# Browser test outputs
+.playwright-cli/
+playwright-report/
+test-results/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -48,11 +70,19 @@ htmlcov/
 /后端/logs/
 /后端/tmp/
 
-# Packaging artifacts
+# Packaging artifacts and local delivery bundles
 *.apk
 *.aab
+*.apks
+*.xapk
 *.tar.gz
+*.tgz
 *.zip
+*.7z
+/app-debug.apk
+/TravelPlanet-*.apk
+/TravelPlanet-*.zip
+/travelplanet_backend_deploy_*.tar.gz
 
 # Editors and operating systems
 .idea/

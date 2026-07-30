@@ -1,0 +1,17 @@
+{
+  "appId": "com.travelplanet.app",
+  "appName": "旅行星球",
+  "webDir": "out",
+  "server": {
+    "cleartext": true,
+    "androidScheme": "http"
+  },
+  "android": {
+    "allowMixedContent": true
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

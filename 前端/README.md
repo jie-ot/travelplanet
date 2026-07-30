@@ -104,6 +104,19 @@ NEXT_PUBLIC_ASSET_BASE_URL=http://192.168.10.222:8000
 
 **特别注意：只替换 `localhost`，两个地址中的 `:8000` 端口都必须保留，不能删除，也不能改成前端使用的 `:3000`。** 保存文件后，请按照第 4 节重新构建并启动前端。
 
+当前云端后端及 Android APK 使用以下固定地址：
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://114.132.201.196:8000/api
+NEXT_PUBLIC_ASSET_BASE_URL=http://114.132.201.196:8000
+```
+
+Android APP 的固定图标源文件为 `design/travelplanet-app-icon.png`。后续打包必须继续从该文件生成各分辨率图标，未经明确确认不要替换或重新设计。
+
+Android APK 必须保留 `capacitor.config.json` 中的 `plugins.CapacitorHttp.enabled: true`，让云端 API 请求使用原生 HTTP，避免 WebView 的 CORS 限制。
+
+云端图片目前通过 `http://114.132.201.196:8000/static/...` 提供，因此 Android 的 `server.androidScheme` 必须保持为 `http`，避免图片成为 HTTPS WebView 中的混合内容。
+
 ## 4. 安装依赖并启动前端
 
 在前端**项目根目录**（有 `package.json` 的文件夹）打开终端，依次执行：
