@@ -119,6 +119,46 @@ export interface Plan {
   itineraryData: ItineraryData
 }
 
+/* ---------------- 多轮旅行规划会话 ---------------- */
+
+export type PlanningPhase = "collecting" | "confirming" | "completed"
+
+export interface PlanningChatMessage {
+  role: "user" | "assistant"
+  content: string
+}
+
+export interface PlanningBrief {
+  origin: string | null
+  destinations: string[]
+  startDate: string | null
+  endDate: string | null
+  travelerCount: number | null
+  budget: string | null
+  transportPreference: string | null
+  lodgingPreference: string | null
+  interests: string[]
+  constraints: string[]
+  assumptions: string[]
+  summary: string
+}
+
+export interface PlanningChecklistItem {
+  key: string
+  label: string
+  value: string
+  status: "ready" | "assumed" | "missing"
+  required: boolean
+}
+
+export interface PlanningResponse {
+  phase: PlanningPhase
+  assistantMessage: string
+  brief: PlanningBrief | null
+  checklist: PlanningChecklistItem[]
+  itinerary: ItineraryData | null
+}
+
 /* ---------------- 结构化行程数据 (ItineraryData) ---------------- */
 
 export interface ItineraryData {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "TravelPlanet APK 打包"
+  short_description: "构建、验证并清理可直接升级安装的旅行星球 Android APK"
+  default_prompt: "Use $travelplanet-apk-builder to build and verify the latest TravelPlanet Android APK."

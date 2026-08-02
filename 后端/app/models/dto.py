@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.models.itinerary import ItineraryData
@@ -187,10 +187,57 @@ class GenerateRequest(CamelModel):
     options: GenerateOptions
 
 
+PlanningPhase = Literal["collecting", "confirming", "completed"]
+PlanningMessageRole = Literal["user", "assistant"]
+PlanningChecklistStatus = Literal["ready", "assumed", "missing"]
+
+
+class PlanningChatMessage(CamelModel):
+    role: PlanningMessageRole
+    content: str
+
+
+class PlanningBrief(CamelModel):
+    """Structured requirement state accumulated across planning chat turns."""
+
+    origin: str | None = None
+    destinations: list[str] = Field(default_factory=list)
+    start_date: str | None = None
+    end_date: str | None = None
+    traveler_count: int | None = None
+    budget: str | None = None
+    transport_preference: str | None = None
+    lodging_preference: str | None = None
+    interests: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class PlanningChecklistItem(CamelModel):
+    key: str
+    label: str
+    value: str
+    status: PlanningChecklistStatus
+    required: bool
+
+
 class PlanningRequest(CamelModel):
     message: str
-    # First turn is null; later turns carry the full ItineraryData (snake_case).
-    context: ItineraryData | None
+    # New plans collect requirements first. Existing plans may still be refined
+    # directly by passing context + confirmed=true.
+    context: ItineraryData | None = None
+    messages: list[PlanningChatMessage] = Field(default_factory=list)
+    brief: PlanningBrief | None = None
+    confirmed: bool = False
+
+
+class PlanningResponse(CamelModel):
+    phase: PlanningPhase
+    assistant_message: str
+    brief: PlanningBrief | None = None
+    checklist: list[PlanningChecklistItem] = Field(default_factory=list)
+    itinerary: ItineraryData | None = None
 
 
 class PlanSaveRequest(CamelModel):

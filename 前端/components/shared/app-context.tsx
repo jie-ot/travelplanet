@@ -1,8 +1,17 @@
 "use client"
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
+import { App as CapacitorApp } from "@capacitor/app"
+import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import { usePathname, useRouter } from "next/navigation"
-import type { BusinessCode, PageType, Plan, PostcardGroup, Report } from "@/types"
+import type {
+  BusinessCode,
+  PageType,
+  Plan,
+  PlanningResponse,
+  PostcardGroup,
+  Report,
+} from "@/types"
 import {
   createPlan,
   deletePlan as apiDeletePlan,
@@ -16,6 +25,7 @@ import {
   updatePlan,
   uploadImage,
   type GenerateResult,
+  type PlanWithAIInput,
 } from "@/lib/api"
 import { readPhotoMeta } from "@/lib/exif"
 import { AppError, CODE_MESSAGE, friendlyMessage, type BusinessErrorCode } from "@/lib/errors"
@@ -144,6 +154,7 @@ interface AppContextValue {
   // 导航
   navigate: (entry: NavEntry) => void
   goBack: () => void
+  registerBackHandler: (handler: () => void) => () => void
   // 数据
   postcardGroups: PostcardGroup[]
   reports: Report[]
@@ -164,7 +175,7 @@ interface AppContextValue {
   editingPlanId: string | null
   hasUnsavedDraft: boolean
   planning: boolean
-  planFirstTurn: (message: string) => Promise<ItineraryData | null>
+  planningTurn: (input: PlanWithAIInput) => Promise<PlanningResponse | null>
   planRefine: (message: string) => Promise<ItineraryData | null>
   beginNewPlan: () => void
   beginEditPlan: (plan: Plan) => void
@@ -190,6 +201,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const navigationDepth = useRef(0)
+  const pathnameRef = useRef(pathname)
+  const goBackRef = useRef<() => void>(() => undefined)
+  const backHandlers = useRef<Array<() => void>>([])
   const [postcardGroups, setPostcardGroups] = useState<PostcardGroup[]>([])
   const [reports, setReports] = useState<Report[]>([])
   const [plans, setPlans] = useState<Plan[]>([])
@@ -232,6 +246,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
     router.replace(parentHref(pathname))
   }, [pathname, router])
+
+  const registerBackHandler = useCallback((handler: () => void) => {
+    backHandlers.current.push(handler)
+    return () => {
+      const index = backHandlers.current.lastIndexOf(handler)
+      if (index >= 0) backHandlers.current.splice(index, 1)
+    }
+  }, [])
+
+  useEffect(() => {
+    pathnameRef.current = pathname
+    goBackRef.current = goBack
+  }, [goBack, pathname])
+
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "android" || !Capacitor.isPluginAvailable("App")) return
+
+    let cancelled = false
+    let listener: PluginListenerHandle | null = null
+
+    void CapacitorApp.addListener("backButton", () => {
+      const handler = backHandlers.current[backHandlers.current.length - 1]
+      if (handler) {
+        handler()
+        return
+      }
+      if (pathnameRef.current === "/") {
+        void CapacitorApp.exitApp()
+        return
+      }
+      goBackRef.current()
+    }).then((handle) => {
+      if (cancelled) {
+        void handle.remove()
+        return
+      }
+      listener = handle
+    })
+
+    return () => {
+      cancelled = true
+      if (listener) void listener.remove()
+    }
+  }, [])
 
   const dismissToast = useCallback((id: string) => {
     setToasts((t) => t.filter((x) => x.id !== id))
@@ -437,16 +495,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   )
 
   /* ---------------- 旅行规划对话流程（规范 2.3 / §10） ---------------- */
-  // 首轮：context 传 null，返回完整 ItineraryData，全量替换草稿
-  const planFirstTurn = useCallback(
-    async (message: string): Promise<ItineraryData | null> => {
+  // 需求澄清与确认共用一个入口；只有 completed 响应才写入行程草稿。
+  const planningTurn = useCallback(
+    async (input: PlanWithAIInput): Promise<PlanningResponse | null> => {
       setPlanning(true)
       try {
-        const data = await planWithAI({ message, context: null })
-        setDraftItineraryData(data)
-        setEditingPlanId(null)
-        setHasUnsavedDraft(true)
-        return data
+        const response = await planWithAI(input)
+        if (response.itinerary) {
+          setDraftItineraryData(response.itinerary)
+          if (!input.context) setEditingPlanId(null)
+          setHasUnsavedDraft(true)
+        }
+        return response
       } catch (err) {
         toastError(err)
         return null
@@ -457,24 +517,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [toastError],
   )
 
-  // 多轮：context 传当前持有的完整 ItineraryData，返回后全量替换草稿
+  // 已生成行程的后续打磨仍视为用户对当前版本的明确修改请求。
   const planRefine = useCallback(
     async (message: string): Promise<ItineraryData | null> => {
       if (!draftItineraryData) return null
-      setPlanning(true)
-      try {
-        const data = await planWithAI({ message, context: draftItineraryData })
-        setDraftItineraryData(data)
-        setHasUnsavedDraft(true)
-        return data
-      } catch (err) {
-        toastError(err)
-        return null
-      } finally {
-        setPlanning(false)
-      }
+      const response = await planningTurn({
+        message,
+        context: draftItineraryData,
+        messages: [{ role: "user", content: message }],
+        confirmed: true,
+      })
+      return response?.itinerary ?? null
     },
-    [draftItineraryData, toastError],
+    [draftItineraryData, planningTurn],
   )
 
   // 全新规划：清空草稿与编辑态
@@ -533,6 +588,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     () => ({
       navigate,
       goBack,
+      registerBackHandler,
       postcardGroups,
       reports,
       plans,
@@ -550,7 +606,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       editingPlanId,
       hasUnsavedDraft,
       planning,
-      planFirstTurn,
+      planningTurn,
       planRefine,
       beginNewPlan,
       beginEditPlan,
@@ -570,6 +626,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [
       navigate,
       goBack,
+      registerBackHandler,
       postcardGroups,
       reports,
       plans,
@@ -587,7 +644,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       editingPlanId,
       hasUnsavedDraft,
       planning,
-      planFirstTurn,
+      planningTurn,
       planRefine,
       beginNewPlan,
       beginEditPlan,

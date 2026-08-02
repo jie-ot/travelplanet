@@ -2,7 +2,16 @@
  * 业务 API 门面（唯一对外入口）。
  * View 与 AppProvider 只依赖本文件，所有请求由 real-api 和 http-client 统一处理。
  */
-import type { ItineraryData, Plan, PostcardGroup, Report, UploadedPhoto } from "@/types"
+import type {
+  ItineraryData,
+  Plan,
+  PlanningBrief,
+  PlanningChatMessage,
+  PlanningResponse,
+  PostcardGroup,
+  Report,
+  UploadedPhoto,
+} from "@/types"
 import { realApi } from "./real-api"
 
 export interface GenerateInput {
@@ -19,6 +28,9 @@ export interface GenerateResult {
 export interface PlanWithAIInput {
   message: string
   context: ItineraryData | null
+  messages?: PlanningChatMessage[]
+  brief?: PlanningBrief | null
+  confirmed?: boolean
 }
 
 /** 后端能力契约。 */
@@ -33,7 +45,7 @@ export interface TravelApi {
   generateTravelArtifacts(input: GenerateInput): Promise<GenerateResult>
 
   // 旅行前流
-  planWithAI(input: PlanWithAIInput): Promise<ItineraryData>
+  planWithAI(input: PlanWithAIInput): Promise<PlanningResponse>
   createPlan(input: { itineraryData: ItineraryData }): Promise<Plan>
   updatePlan(id: string, input: { itineraryData: ItineraryData }): Promise<Plan>
 
@@ -58,7 +70,7 @@ export function uploadImage(file: File): Promise<{ assetId: string; imageUrl: st
 export function generateTravelArtifacts(input: GenerateInput): Promise<GenerateResult> {
   return realApi.generateTravelArtifacts(input)
 }
-export function planWithAI(input: PlanWithAIInput): Promise<ItineraryData> {
+export function planWithAI(input: PlanWithAIInput): Promise<PlanningResponse> {
   return realApi.planWithAI(input)
 }
 export function createPlan(input: { itineraryData: ItineraryData }): Promise<Plan> {

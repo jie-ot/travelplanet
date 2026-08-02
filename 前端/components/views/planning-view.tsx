@@ -1,24 +1,39 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useApp } from "@/components/shared/app-context"
 import { TopBar } from "@/components/shared/top-bar"
 import { ItineraryDetail } from "@/components/shared/itinerary-detail"
+import {
+  PlanningConversation,
+  type PlanningConversationMessage,
+} from "@/components/shared/planning-conversation"
 import { PlanningProgress } from "@/components/shared/planning-progress"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
-import { Sparkles, Save, RotateCcw, Wand2, History, Send } from "lucide-react"
+import { Sparkles, Save, RotateCcw, History, Send } from "lucide-react"
+import type { PlanningBrief, PlanningChecklistItem } from "@/types"
+
+const INITIAL_MESSAGES: PlanningConversationMessage[] = [
+  {
+    id: "welcome",
+    role: "assistant",
+    content:
+      "你好，我会先和你聊清楚这趟旅行，再整理一份确认清单。你可以从任何想法开始：想去哪、什么时候出发，或者只是想找点灵感。",
+  },
+]
 
 export function PlanningView() {
   const {
     navigate,
     goBack,
+    registerBackHandler,
     toast,
     toastCode,
     draftItineraryData,
     editingPlanId,
     hasUnsavedDraft,
     planning,
-    planFirstTurn,
+    planningTurn,
     planRefine,
     beginNewPlan,
     discardDraft,
@@ -29,27 +44,97 @@ export function PlanningView() {
   const [prompt, setPrompt] = useState("")
   const [refinePrompt, setRefinePrompt] = useState("")
   const [saved, setSaved] = useState(false)
+  const [chatMessages, setChatMessages] =
+    useState<PlanningConversationMessage[]>(INITIAL_MESSAGES)
+  const [brief, setBrief] = useState<PlanningBrief | null>(null)
+  const [checklist, setChecklist] = useState<PlanningChecklistItem[]>([])
+  const [conversationPhase, setConversationPhase] =
+    useState<"collecting" | "confirming">("collecting")
+  const [generationRequested, setGenerationRequested] = useState(false)
   // 未保存草稿返回拦截（规范 §10.5）
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
   const pendingLeave = useRef<(() => void) | null>(null)
 
   // 继续编辑的草稿载入已在「历史规划」点击时完成（beginEditPlan + URL 导航），此处仅消费 context
 
-  const phase: "input" | "generating" | "result" = planning
-    ? "generating"
-    : draftItineraryData
-      ? "result"
-      : "input"
+  const phase: "conversation" | "generating" | "result" =
+    planning && (generationRequested || draftItineraryData)
+      ? "generating"
+      : draftItineraryData
+        ? "result"
+        : "conversation"
 
-  async function handleGenerate() {
+  async function handleConversationSend() {
     const text = prompt.trim()
     if (!text) {
       toastCode(1002)
       return
     }
+    const userMessage: PlanningConversationMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: text,
+    }
+    const nextMessages = [...chatMessages, userMessage]
+    setChatMessages(nextMessages)
+    setPrompt("")
     setSaved(false)
-    const result = await planFirstTurn(text)
-    if (result) setPrompt("")
+    const response = await planningTurn({
+      message: text,
+      context: null,
+      messages: nextMessages.map(({ role, content }) => ({ role, content })),
+      brief,
+      confirmed: false,
+    })
+    if (!response) return
+    setBrief(response.brief)
+    setChecklist(response.checklist)
+    if (response.phase !== "completed") setConversationPhase(response.phase)
+    if (response.assistantMessage) {
+      setChatMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          content: response.assistantMessage,
+        },
+      ])
+    }
+  }
+
+  async function handleConfirmPlan() {
+    if (!brief || conversationPhase !== "confirming") return
+    const confirmationText = "这份确认清单无误，请开始生成行程。"
+    const userMessage: PlanningConversationMessage = {
+      id: `user-confirm-${Date.now()}`,
+      role: "user",
+      content: confirmationText,
+    }
+    const nextMessages = [...chatMessages, userMessage]
+    setChatMessages(nextMessages)
+    setGenerationRequested(true)
+    const response = await planningTurn({
+      message: confirmationText,
+      context: null,
+      messages: nextMessages.map(({ role, content }) => ({ role, content })),
+      brief,
+      confirmed: true,
+    })
+    setGenerationRequested(false)
+    if (!response || response.itinerary) return
+    setBrief(response.brief)
+    setChecklist(response.checklist)
+    if (response.phase !== "completed") setConversationPhase(response.phase)
+    if (response.assistantMessage) {
+      setChatMessages((current) => [
+        ...current,
+        {
+          id: `assistant-confirm-${Date.now()}`,
+          role: "assistant",
+          content: response.assistantMessage,
+        },
+      ])
+    }
   }
 
   async function handleRefine() {
@@ -78,6 +163,11 @@ export function PlanningView() {
     setPrompt("")
     setRefinePrompt("")
     setSaved(false)
+    setChatMessages(INITIAL_MESSAGES)
+    setBrief(null)
+    setChecklist([])
+    setConversationPhase("collecting")
+    setGenerationRequested(false)
   }
 
   function leavePlanning(action: () => void) {
@@ -105,6 +195,26 @@ export function PlanningView() {
     action?.()
   }
 
+  useEffect(
+    () =>
+      registerBackHandler(() => {
+        const leave = () => {
+          beginNewPlan()
+          setPrompt("")
+          setRefinePrompt("")
+          setSaved(false)
+          goBack()
+        }
+        if (hasUnsavedDraft && draftItineraryData) {
+          pendingLeave.current = leave
+          setShowLeaveConfirm(true)
+          return
+        }
+        leave()
+      }),
+    [beginNewPlan, draftItineraryData, goBack, hasUnsavedDraft, registerBackHandler],
+  )
+
   return (
     <div className="flex h-full flex-col">
       <TopBar
@@ -128,46 +238,28 @@ export function PlanningView() {
         }
       />
 
-      <div className="flex-1 overflow-y-auto no-scrollbar">
-        {phase === "input" && (
-          <div className="flex flex-col gap-5 px-4 py-5 min-[400px]:gap-6 min-[400px]:px-5 min-[400px]:py-6">
-            <div className="rounded-2xl border border-white/10 bg-[#07516c] p-5 text-white shadow-[0_16px_32px_-22px_rgba(6,45,72,0.85)]">
-              <div className="flex items-center gap-2 text-[#73d4df]">
-                <Wand2 className="h-5 w-5" />
-                <span className="font-display text-sm font-bold tracking-tight">告诉星球你的旅行想法</span>
-              </div>
-              <p className="mt-2 font-editorial text-sm font-medium leading-relaxed text-white/76">
-                描述出发日期、旅行天数、出发地、目的地等，为您生成专属行程。
-              </p>
-            </div>
-
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="例如：我想在7月20号从武汉去大理、丽江玩3天，我喜欢古城和自然风光..."
-              rows={5}
-              className="w-full resize-none rounded-2xl border border-[#0a3850]/12 bg-card/95 p-4 text-sm leading-relaxed text-foreground shadow-[0_12px_24px_-22px_rgba(6,45,72,0.7)] outline-none transition placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/20"
-            />
-
-            <button
-              type="button"
-              onClick={handleGenerate}
-              className="ui-pressable mt-1 flex min-h-12 items-center justify-center gap-2 rounded-full bg-primary py-3 text-sm font-semibold text-primary-foreground shadow-[0_14px_26px_-16px_rgba(7,143,171,0.9)]"
-            >
-              <Sparkles className="h-4 w-4" />
-              生成专属行程
-            </button>
-          </div>
+      <div className="min-h-0 flex-1">
+        {phase === "conversation" && (
+          <PlanningConversation
+            messages={chatMessages}
+            phase={conversationPhase}
+            checklist={checklist}
+            value={prompt}
+            busy={planning}
+            onChange={setPrompt}
+            onSend={() => void handleConversationSend()}
+            onConfirm={() => void handleConfirmPlan()}
+          />
         )}
 
         {phase === "generating" && (
-          <div className="min-h-full px-4 py-6 min-[400px]:px-5">
+          <div className="h-full overflow-y-auto px-4 py-6 min-[400px]:px-5">
             <PlanningProgress />
           </div>
         )}
 
         {phase === "result" && draftItineraryData && (
-          <div className="pb-6">
+          <div className="h-full overflow-y-auto pb-6 no-scrollbar">
             <div className="mx-4 mb-4 mt-5 flex items-start gap-2 rounded-xl border border-primary/10 bg-secondary/85 px-3 py-2.5 text-sm text-secondary-foreground min-[400px]:mx-5">
               <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
               <span>

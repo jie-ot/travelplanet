@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useId, useRef, type ReactNode } from "react"
+import { useApp } from "@/components/shared/app-context"
 import { cn } from "@/lib/utils"
 
 export interface DialogAction {
@@ -25,6 +26,7 @@ export function ConfirmDialog({
   onClose: () => void
   icon?: ReactNode
 }) {
+  const { registerBackHandler } = useApp()
   const titleId = useId()
   const descriptionId = useId()
   const firstActionRef = useRef<HTMLButtonElement>(null)
@@ -43,6 +45,11 @@ export function ConfirmDialog({
       previousFocus?.focus()
     }
   }, [open, onClose])
+
+  useEffect(() => {
+    if (!open) return
+    return registerBackHandler(onClose)
+  }, [open, onClose, registerBackHandler])
 
   if (!open) return null
 

@@ -49,6 +49,7 @@ TASK_POSTCARD_SELECTION = "postcard_selection"
 TASK_POSTCARD_CREATIVE = "postcard_creative"
 TASK_REPORT_DRAFT = "report_draft"
 TASK_PLANNING = "planning"
+TASK_PLANNING_INTAKE = "planning_intake"
 TASK_MEMORY_UPDATE = "memory_update"
 
 

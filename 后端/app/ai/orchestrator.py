@@ -30,6 +30,7 @@ from app.ai.schemas import (
     MemoryUpdateResult,
     PhotoAnalysisItem,
     PhotoAnalysisResult,
+    PlanningIntakeResult,
     PostcardPlanItem,
     PostcardPlanResult,
     PostcardSelectionResult,
@@ -40,6 +41,7 @@ from app.core.business_logging import call_in_current_context, log_event, timed_
 from app.core.config import settings
 from app.core.exceptions import AIGenerationError, ImageInputPolicyError
 from app.models.itinerary import ItineraryData
+from app.models.dto import PlanningBrief, PlanningChatMessage
 
 logger = logging.getLogger("travelplanet")
 
@@ -1201,6 +1203,53 @@ def _plan_with_tools(
         },
         stage="planning_review_regeneration",
     )
+
+
+def collect_planning_requirements(
+    *,
+    messages: list[PlanningChatMessage],
+    previous_brief: PlanningBrief | None,
+    memory_summary: str,
+) -> PlanningIntakeResult:
+    """Run one lightweight conversational intake turn without travel tools."""
+    current_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    system_prompt = (
+        f"【当前日期】\n今天是 {current_date}（北京时间）。\n\n"
+        + load_prompt("planning_intake_system.md")
+    )
+    bounded_messages = [
+        {
+            "role": message.role,
+            "content": message.content.strip()[:1600],
+        }
+        for message in messages[-16:]
+        if message.content.strip()
+    ]
+    user_text = json.dumps(
+        {
+            "memorySummary": memory_summary[:1600],
+            "previousBrief": (
+                previous_brief.model_dump(by_alias=True)
+                if previous_brief is not None
+                else None
+            ),
+            "conversation": bounded_messages,
+        },
+        ensure_ascii=False,
+    )
+    with timed_stage(
+        "planning_intake_model",
+        conversation_turns=len(bounded_messages),
+        has_previous_brief=previous_brief is not None,
+    ):
+        raw = vivo_chat_client.chat_json(
+            task=vivo_chat_client.TASK_PLANNING_INTAKE,
+            system_prompt=system_prompt,
+            user_text=user_text,
+            temperature=0.2,
+            max_completion_tokens=3000,
+        )
+    return output_parser.parse_model_json(raw, PlanningIntakeResult)
 
 
 class _AuditQuery(BaseModel):

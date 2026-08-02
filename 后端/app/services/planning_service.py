@@ -1,9 +1,8 @@
 """`/api/ai/planning` (#6) main flow (《任务详细流程规范》七).
 
-Validate → read memory → (Phase 6: controlled fact pack) → orchestrator returns
-full ItineraryData (one JSON-repair retry inside orchestrator) → deterministic
-schedule ordering → stable-ID alignment vs context → business validation → return full ItineraryData. Read-
-only: no DB transaction, NO profile update (planning never updates memory).
+Validate → read memory → multi-turn requirement intake → explicit user
+confirmation → controlled fact research → full ItineraryData → deterministic
+alignment and validation. Planning never updates the user's preference profile.
 Failures: 1002 (param), 1001 (model/JSON/validation), 1003 (config).
 """
 
@@ -21,21 +20,26 @@ from app.core.exceptions import (
     InvalidParamError,
 )
 from app.db.session import session_scope
-from app.models.dto import PlanningRequest
+from app.models.dto import (
+    PlanningChatMessage,
+    PlanningRequest,
+    PlanningResponse,
+)
 from app.models.itinerary import ItineraryData
 from app.services import (
     id_service,
     itinerary_id_service,
     itinerary_validation_service,
     memory_service,
+    planning_intake_service,
     travel_fact_service,
 )
 
 logger = logging.getLogger("travelplanet")
 
 
-def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
-    """Generate the next full ItineraryData for the planning conversation."""
+def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
+    """Advance requirement chat or generate after explicit confirmation."""
     if not request.message or not request.message.strip():
         raise InvalidParamError("规划需求不能为空")
 
@@ -45,6 +49,42 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
             memory_summary = memory_service.build_memory_summary(memory)
 
     try:
+        if request.context is None and not request.confirmed:
+            return _collect_requirements(
+                request=request,
+                memory_summary=memory_summary,
+            )
+
+        planning_message = request.message
+        if request.context is None:
+            if request.brief is None:
+                raise InvalidParamError("确认生成前缺少旅行需求清单")
+            brief = planning_intake_service.normalize_brief(request.brief)
+            missing = planning_intake_service.missing_required_fields(brief)
+            if missing:
+                log_event(
+                    "planning_confirmation_blocked",
+                    status="collecting",
+                    missing_fields=missing,
+                )
+                return PlanningResponse(
+                    phase="collecting",
+                    assistant_message=_missing_fields_message(missing),
+                    brief=brief,
+                    checklist=planning_intake_service.build_checklist(brief),
+                )
+            planning_message = planning_intake_service.confirmed_requirement_text(
+                brief,
+                request.message,
+            )
+            log_event(
+                "planning_confirmation_accepted",
+                status="confirmed",
+                destination_count=len(brief.destinations),
+                start_date=brief.start_date,
+                end_date=brief.end_date,
+            )
+
         # Do not pre-inject ready-made B-class guidance. A/A′ facts are obtained
         # through the Function Calling loop; the prompt supplies B-class fallback
         # rules for use only after a relevant tool fails or is unavailable.
@@ -55,16 +95,16 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
             task_type="planning",
             protocol="declare_scope_fact_state_finish_audit_v1",
             is_refinement=request.context is not None,
-            message_chars=len(request.message),
-            message_excerpt=_excerpt(request.message),
+            message_chars=len(planning_message),
+            message_excerpt=_excerpt(planning_message),
         )
         fact_pack_dict = None
-        if travel_fact_service.needs_facts(request.message, request.context):
+        if travel_fact_service.needs_facts(planning_message, request.context):
             with timed_stage("planning_build_fact_pack"):
                 try:
                     pack = travel_fact_service.build_fact_pack(
                         user_id=user_id,
-                        message=request.message,
+                        message=planning_message,
                         context=request.context,
                         task_type="planning",
                         request_id=request_id,
@@ -95,8 +135,8 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
         log_event(
             "planning_prompt_summary",
             status="ready",
-            message_excerpt=_excerpt(request.message),
-            message_chars=len(request.message),
+            message_excerpt=_excerpt(planning_message),
+            message_chars=len(planning_message),
             context=_summarize_context(request.context),
             memory_summary_chars=len(memory_summary),
             fact_pack=_summarize_fact_pack(fact_pack_dict),
@@ -124,7 +164,7 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
             protocol="declare_scope_fact_state_finish_audit_v1",
         ):
             new_data = orchestrator.plan_itinerary(
-                message=request.message,
+                message=planning_message,
                 context=request.context,
                 memory_summary=memory_summary,
                 fact_pack=fact_pack_dict,
@@ -164,12 +204,75 @@ def plan(user_id: str, request: PlanningRequest) -> ItineraryData:
             request_id=request_id,
             structure=_summarize_itinerary(aligned),
         )
-        return aligned
+        return PlanningResponse(
+            phase="completed",
+            assistant_message="行程已经生成完成，你还可以继续告诉我想怎么调整。",
+            brief=request.brief,
+            itinerary=aligned,
+        )
     except BusinessError:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("planning failed")
         raise InternalError("行程规划服务内部错误") from exc
+
+
+def _collect_requirements(
+    *,
+    request: PlanningRequest,
+    memory_summary: str,
+) -> PlanningResponse:
+    messages = list(request.messages)
+    if not messages or (
+        messages[-1].role != "user"
+        or messages[-1].content.strip() != request.message.strip()
+    ):
+        messages.append(PlanningChatMessage(role="user", content=request.message))
+    with timed_stage(
+        "planning_collect_requirements",
+        conversation_turns=len(messages),
+        has_previous_brief=request.brief is not None,
+    ):
+        intake = orchestrator.collect_planning_requirements(
+            messages=messages,
+            previous_brief=request.brief,
+            memory_summary=memory_summary,
+        )
+    brief = planning_intake_service.normalize_brief(intake.brief)
+    missing = planning_intake_service.missing_required_fields(brief)
+    phase = "collecting" if missing else "confirming"
+    assistant_message = intake.assistant_message.strip()
+    if not assistant_message:
+        assistant_message = (
+            _missing_fields_message(missing)
+            if missing
+            else "必要信息已经齐了。请核对确认清单；你可以继续补充，也可以确认生成。"
+        )
+    checklist = planning_intake_service.build_checklist(brief)
+    log_event(
+        "planning_intake_result",
+        status=phase,
+        conversation_turns=len(messages),
+        missing_fields=missing,
+        checklist_status_counts=_count_values(item.status for item in checklist),
+    )
+    return PlanningResponse(
+        phase=phase,
+        assistant_message=assistant_message,
+        brief=brief,
+        checklist=checklist,
+    )
+
+
+def _missing_fields_message(missing: list[str]) -> str:
+    labels = {
+        "origin": "出发地",
+        "destinations": "目的地",
+        "startDate": "开始日期",
+        "endDate": "结束日期",
+    }
+    readable = "、".join(labels.get(field, field) for field in missing)
+    return f"还差一点必要信息：{readable}。补充后我会先给你一份确认清单，不会直接生成行程。"
 
 
 def _excerpt(text: str | None, limit: int = 240) -> str:
