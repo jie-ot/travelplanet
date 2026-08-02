@@ -1,0 +1,14 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.py[cod]
+.env
+data/
+logs/
+static/uploads/
+static/generated/
+tests/
+*.tar.gz
+*.zip
