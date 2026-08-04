@@ -117,15 +117,27 @@ def _get(path: str, params: dict) -> dict | None:
                 resp = client.get(url, params=query)
             if resp.status_code != 200:
                 logger.warning("amap %s http %d", path, resp.status_code)
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    if attempt + 1 < attempts:
+                        time.sleep(min(0.5, 0.2 * (attempt + 1)))
+                    continue
                 return None
             data = resp.json()
             if str(data.get("status")) != "1":
+                info = str(data.get("info") or "").upper()
                 logger.warning(
                     "amap %s status=%s info=%s",
                     path,
                     data.get("status"),
                     data.get("info"),
                 )
+                if any(
+                    marker in info
+                    for marker in ("TOO_FREQUENT", "QPS", "SERVER_IS_BUSY")
+                ):
+                    if attempt + 1 < attempts:
+                        time.sleep(min(0.5, 0.2 * (attempt + 1)))
+                    continue
                 return None
             return data
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
@@ -135,6 +147,8 @@ def _get(path: str, params: dict) -> dict | None:
                 attempt + 1,
                 type(exc).__name__,
             )
+            if attempt + 1 < attempts:
+                time.sleep(min(0.5, 0.2 * (attempt + 1)))
             continue
         except Exception:  # noqa: BLE001
             logger.exception("amap %s unexpected error", path)

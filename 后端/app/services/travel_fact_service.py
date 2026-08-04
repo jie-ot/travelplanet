@@ -192,7 +192,13 @@ def execute_tool(
             },
             error_code="tool_not_whitelisted",
         )
-        return {"tool": tool_name, "status": "error", "message": "未知或未授权的工具"}
+        return {
+            "tool": tool_name,
+            "status": "error",
+            "message": "未知或未授权的工具",
+            "error_code": "tool_not_whitelisted",
+            "retryable": False,
+        }
 
     try:
         args = schema.model_validate(arguments or {})
@@ -217,6 +223,8 @@ def execute_tool(
             "tool": tool_name,
             "status": "error",
             "message": f"参数不合法：{exc.errors()[:1]}",
+            "error_code": "invalid_args",
+            "retryable": False,
         }
 
     try:
@@ -266,9 +274,38 @@ def execute_tool(
             "tool": tool_name,
             "status": "error",
             "message": "工具执行失败，请以官方渠道为准",
+            "error_code": "exec_error",
+            "error_type": type(exc).__name__,
+            "retryable": _is_retryable_tool_exception(exc),
         }
 
-    return {"tool": tool_name, "status": "error", "message": "未知或未授权的工具"}
+    return {
+        "tool": tool_name,
+        "status": "error",
+        "message": "未知或未授权的工具",
+        "error_code": "tool_not_whitelisted",
+        "retryable": False,
+    }
+
+
+def _is_retryable_tool_exception(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(
+        marker in name or marker in text
+        for marker in (
+            "timeout",
+            "connect",
+            "connection",
+            "ratelimit",
+            "rate_limit",
+            "temporar",
+            "429",
+            "502",
+            "503",
+            "504",
+        )
+    )
 
 
 def _diagnostic_value(value, *, depth: int = 0):  # noqa: ANN001, ANN202
@@ -805,6 +842,13 @@ def _tripmatch_result(  # noqa: ANN001
         result["error_code"] = outcome.error_code
     if outcome.error_message:
         result["error_message"] = outcome.error_message
+    if outcome.http_status is not None:
+        result["http_status"] = outcome.http_status
+    result["retryable"] = _is_retryable_provider_result(
+        status=outcome.status,
+        error_code=outcome.error_code,
+        http_status=outcome.http_status,
+    )
     if outcome.status == "provider_not_connected":
         result["note"] = (
             "飞友 MCP 尚未配置可用 API Key，当前未执行真实查询；"
@@ -813,6 +857,33 @@ def _tripmatch_result(  # noqa: ANN001
     elif outcome.status != "ok":
         result["note"] = "航班数据暂不可用，请以航司或机场官方渠道复核"
     return result
+
+
+def _is_retryable_provider_result(
+    *,
+    status: str | None,
+    error_code: str | None,
+    http_status: int | None = None,
+) -> bool:
+    normalized_status = str(status or "").lower()
+    normalized_code = str(error_code or "").lower()
+    if normalized_status == "timeout" or http_status == 429:
+        return True
+    if isinstance(http_status, int) and http_status >= 500:
+        return True
+    return any(
+        marker in normalized_code
+        for marker in (
+            "timeout",
+            "rate_limited",
+            "upstream_error",
+            "connection",
+            "temporar",
+            "warming_up",
+            "call_failed",
+            "startup_or_call_failed",
+        )
+    )
 
 
 def _exec_flight_itineraries(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
@@ -993,7 +1064,10 @@ def _exec_rail(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
         }
     attempted = rail_mcp_provider.is_enabled()
     runtime_status = rail_mcp_provider.runtime_status()
-    error_code = {
+    query_error_code = (
+        rail_mcp_provider.last_query_error_code() if attempted else None
+    )
+    error_code = query_error_code or {
         "absent": "rail_mcp_not_started",
         "starting": "rail_mcp_warming_up",
         "failed": "rail_mcp_startup_or_call_failed",
@@ -1022,4 +1096,9 @@ def _exec_rail(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
         "status": "needs_official_confirmation",
         "note": "暂未获取到参考车次（社区 MCP 可能正在预热或不可用），请在 12306 官方 App 查询车次/席别/时刻并尽早购票或候补",
         "official_entry": _guide_dict(guide),
+        "error_code": error_code,
+        "retryable": _is_retryable_provider_result(
+            status="needs_official_confirmation",
+            error_code=error_code,
+        ),
     }

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -54,7 +56,7 @@ logger = logging.getLogger("travelplanet")
 # Planning function-calling loop bounds (defensive; tool execution is fast and
 # non-blocking, but the model must always converge to a final JSON answer).
 _MAX_TOOL_ROUNDS = 8
-_MAX_DEEPSEEK_TOOL_ROUNDS = 5
+_TARGET_TOOL_ROUNDS = 5
 _MAX_TOOL_CALLS_TOTAL = 75
 _MAX_INTAKE_TOOL_ROUNDS = 3
 _MAX_INTAKE_TOOL_CALLS_TOTAL = 8
@@ -135,28 +137,73 @@ class _PlanningFallbackExhausted(AIGenerationError):
 def _execute_external_batch(
     requests: dict[str, tuple[str, dict[str, Any]]],
     execute_tool: ToolExecutor,
+    *,
+    max_total_attempts: int | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Run independent tool requests concurrently, isolating failures.
+    """Run independent queries concurrently with per-query transient retries.
 
     The key is normally the normalized cache key. AMap and independent
     Tripmatch calls share the general worker pool; 12306 calls stay serial
     because its persistent MCP session is not documented as concurrency-safe,
-    while still overlapping with the other providers.
+    while still overlapping with the other providers. Retry budget is reserved
+    only for the query that failed; unrelated queries are never replayed.
     """
     if not requests:
         return {}
 
+    max_attempts = max(1, settings.TOOL_MAX_RETRY + 1)
+    extra_attempts = (
+        None
+        if max_total_attempts is None
+        else max(0, max_total_attempts - len(requests))
+    )
+    retry_budget_lock = threading.Lock()
+
+    def reserve_retry() -> bool:
+        nonlocal extra_attempts
+        if extra_attempts is None:
+            return True
+        with retry_budget_lock:
+            if extra_attempts <= 0:
+                return False
+            extra_attempts -= 1
+            return True
+
     def run_one(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        try:
-            return execute_tool(tool_name, arguments)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("parallel planning tool failed (non-fatal): %s", tool_name)
-            return {
-                "tool": tool_name,
-                "status": "error",
-                "message": "工具执行失败，请以官方渠道为准",
-                "error_type": type(exc).__name__,
-            }
+        result: dict[str, Any] = {}
+        attempts = 0
+        for attempt in range(1, max_attempts + 1):
+            attempts = attempt
+            try:
+                result = execute_tool(tool_name, arguments)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "parallel planning tool failed (non-fatal): %s", tool_name
+                )
+                result = {
+                    "tool": tool_name,
+                    "status": "error",
+                    "message": "工具执行失败，请以官方渠道为准",
+                    "error_type": type(exc).__name__,
+                    "error_code": "tool_executor_exception",
+                    "retryable": _is_transient_exception(exc),
+                }
+            retryable, retry_reason = _classify_tool_retry(result)
+            result["retryable"] = retryable
+            if not retryable or attempt >= max_attempts or not reserve_retry():
+                break
+            log_event(
+                "planning_tool_point_retry",
+                status="scheduled",
+                tool_name=tool_name,
+                arguments=_summarize_planning_value(arguments),
+                failed_attempt=attempt,
+                max_attempts=max_attempts,
+                retry_reason=retry_reason,
+            )
+            time.sleep(min(0.5, 0.2 * attempt))
+        result["_attempt_count"] = attempts
+        return result
 
     general = {
         key: item
@@ -181,6 +228,68 @@ def _execute_external_batch(
         for key, future in futures.items():
             results[key] = future.result()
     return results
+
+
+def _is_transient_exception(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(
+        marker in name or marker in text
+        for marker in (
+            "timeout",
+            "connect",
+            "connection",
+            "ratelimit",
+            "rate_limit",
+            "temporar",
+            "429",
+            "502",
+            "503",
+            "504",
+        )
+    )
+
+
+def _classify_tool_retry(result: dict[str, Any]) -> tuple[bool, str]:
+    """Classify one structured tool result without retrying business misses."""
+    explicit = result.get("retryable")
+    error_code = str(result.get("error_code") or "").lower()
+    status = str(result.get("status") or "").lower()
+    http_status = result.get("http_status")
+    if explicit is not None:
+        return bool(explicit), error_code or status or "explicit"
+    if status == "timeout" or http_status == 429:
+        return True, error_code or status
+    if isinstance(http_status, int) and http_status >= 500:
+        return True, error_code or f"http_{http_status}"
+    transient_markers = (
+        "timeout",
+        "rate_limited",
+        "upstream_error",
+        "connection",
+        "temporar",
+        "warming_up",
+        "call_failed",
+        "startup_or_call_failed",
+    )
+    if any(marker in error_code for marker in transient_markers):
+        return True, error_code
+    return False, error_code or status or "not_retryable"
+
+
+def _cacheable_tool_result(result: dict[str, Any]) -> bool:
+    """Transient failures must not poison the same-request query cache."""
+    retryable, _ = _classify_tool_retry(result)
+    return not retryable
+
+
+def _tool_result_has_usable_fact(result: dict[str, Any]) -> bool:
+    context = result.get("result_context")
+    context_status = context.get("status") if isinstance(context, dict) else None
+    return str(result.get("status") or context_status or "").lower() in {
+        "ok",
+        "needs_official_confirmation",
+    }
 
 
 def analyze_photos(
@@ -1030,18 +1139,19 @@ def _plan_with_tools(
     allowed_external_tool_names = tool_specs.external_tool_names_for_model(
         planning_model
     )
-    max_tool_rounds = (
-        _MAX_DEEPSEEK_TOOL_ROUNDS
-        if planning_model in DEEPSEEK_PLANNING_MODELS
-        else _MAX_TOOL_ROUNDS
-    )
+    active_round_limit = _TARGET_TOOL_ROUNDS
+    forced_close_reason = "target_rounds_complete"
 
-    for round_idx in range(max_tool_rounds):
+    for round_idx in range(_MAX_TOOL_ROUNDS):
+        if round_idx >= active_round_limit:
+            break
         log_event(
             "planning_tool_round",
             round=round_idx + 1,
-            max_rounds=max_tool_rounds,
-            remaining_rounds_including_current=max_tool_rounds - round_idx,
+            target_rounds=_TARGET_TOOL_ROUNDS,
+            max_rounds=_MAX_TOOL_ROUNDS,
+            active_round_limit=active_round_limit,
+            remaining_rounds_including_current=active_round_limit - round_idx,
             total_calls=external_calls,
             max_external_calls=_MAX_TOOL_CALLS_TOTAL,
             message_count=len(messages),
@@ -1065,7 +1175,7 @@ def _plan_with_tools(
             "planning_tool_round_result",
             status="tool_calls" if turn.tool_calls else "premature_content",
             round=round_idx + 1,
-            remaining_rounds=max_tool_rounds - round_idx - 1,
+            remaining_rounds=active_round_limit - round_idx - 1,
             tool_call_count=len(turn.tool_calls),
             tool_names=[tc.name for tc in turn.tool_calls],
             internal_tool_count=sum(
@@ -1103,19 +1213,28 @@ def _plan_with_tools(
         parsed_calls = [(tc, _safe_json_args(tc.arguments)) for tc in turn.tool_calls]
         allowed_external_ids: set[str] = set()
         batch_requests: dict[str, tuple[str, dict[str, Any]]] = {}
-        reserved_calls = 0
+        new_request_keys: set[str] = set()
         for tc, args in parsed_calls:
             if tc.name not in allowed_external_tool_names:
                 continue
-            if external_calls + reserved_calls >= _MAX_TOOL_CALLS_TOTAL:
-                continue
-            reserved_calls += 1
-            allowed_external_ids.add(tc.id)
             cache_key = _planning_tool_cache_key(tc.name, args)
-            if cache_key not in result_cache and cache_key not in batch_requests:
-                batch_requests[cache_key] = (tc.name, args)
-        parallel_results = _execute_external_batch(batch_requests, execute_tool)
-        external_calls += reserved_calls
+            if cache_key in result_cache or cache_key in batch_requests:
+                allowed_external_ids.add(tc.id)
+                continue
+            if external_calls + len(new_request_keys) >= _MAX_TOOL_CALLS_TOTAL:
+                continue
+            allowed_external_ids.add(tc.id)
+            new_request_keys.add(cache_key)
+            batch_requests[cache_key] = (tc.name, args)
+        parallel_results = _execute_external_batch(
+            batch_requests,
+            execute_tool,
+            max_total_attempts=max(0, _MAX_TOOL_CALLS_TOTAL - external_calls),
+        )
+        external_calls += sum(
+            int(result.get("_attempt_count") or 0)
+            for result in parallel_results.values()
+        )
         called_names: list[str] = []
         for call_index, (tc, args) in enumerate(parsed_calls, start=1):
             called_names.append(tc.name)
@@ -1218,13 +1337,17 @@ def _plan_with_tools(
                         result["cached"] = True
                     else:
                         result = deepcopy(parallel_results[cache_key])
-                        result = _register_planning_facts(
-                            tool_name=tc.name,
-                            arguments=args,
-                            result=result,
-                            registry=fact_registry,
-                        )
-                        result_cache[cache_key] = deepcopy(result)
+                        result.pop("_attempt_count", None)
+                        retryable, _ = _classify_tool_retry(result)
+                        if _tool_result_has_usable_fact(result) and not retryable:
+                            result = _register_planning_facts(
+                                tool_name=tc.name,
+                                arguments=args,
+                                result=result,
+                                registry=fact_registry,
+                            )
+                        if _cacheable_tool_result(result):
+                            result_cache[cache_key] = deepcopy(result)
             else:
                 result = {
                     "tool": tc.name,
@@ -1267,7 +1390,43 @@ def _plan_with_tools(
 
         if research_summary is not None:
             break
-        remaining_rounds = max_tool_rounds - round_idx - 1
+        completed_rounds = round_idx + 1
+        if completed_rounds == _TARGET_TOOL_ROUNDS:
+            critical_gaps = _critical_research_gaps(
+                scope=scope,
+                remaining_queries=remaining_queries,
+                fact_registry=fact_registry,
+            )
+            if critical_gaps and external_calls < _MAX_TOOL_CALLS_TOTAL:
+                active_round_limit = _MAX_TOOL_ROUNDS
+                forced_close_reason = "max_rounds_reached_with_critical_gaps"
+                log_event(
+                    "planning_research_rounds_extended",
+                    status="success",
+                    completed_rounds=completed_rounds,
+                    previous_limit=_TARGET_TOOL_ROUNDS,
+                    extended_limit=_MAX_TOOL_ROUNDS,
+                    critical_gaps=critical_gaps,
+                    external_calls=external_calls,
+                    planning_model=planning_model,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "默认 5 轮研究已完成，但以下关键事实仍缺失，因此允许延长到"
+                            f" {_MAX_TOOL_ROUNDS} 轮：{'; '.join(critical_gaps)}。"
+                            "请只补查这些关键缺口，完成后立即调用 finish_research。"
+                        ),
+                    }
+                )
+            else:
+                forced_close_reason = (
+                    "tool_call_budget_exhausted"
+                    if external_calls >= _MAX_TOOL_CALLS_TOTAL
+                    else "target_rounds_complete"
+                )
+        remaining_rounds = active_round_limit - round_idx - 1
         messages.append(
             {
                 "role": "user",
@@ -1297,7 +1456,9 @@ def _plan_with_tools(
         log_event(
             "planning_research_forced_close",
             status="success",
-            reason="max_rounds_reached",
+            reason=forced_close_reason,
+            target_rounds=_TARGET_TOOL_ROUNDS,
+            max_rounds=_MAX_TOOL_ROUNDS,
             external_calls=external_calls,
             fact_registry_count=len(fact_registry),
             retained_fact_count=len(retained_facts),
@@ -1760,6 +1921,90 @@ class _AuditResult(BaseModel):
     problems: list[str]
 
 
+def _critical_research_gaps(
+    *,
+    scope: dict[str, Any] | None,
+    remaining_queries: list[str],
+    fact_registry: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Return only gaps important enough to extend research past round five."""
+    if scope is None:
+        return ["旅行范围未声明"]
+    gaps: list[str] = []
+    tool_names = {
+        str(fact.get("tool") or "")
+        for fact in fact_registry.values()
+        if _tool_result_has_usable_fact(fact)
+    }
+    transport_tools = {
+        tool_specs.TOOL_QUERY_RAIL,
+        tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+    }
+    transport_query_keys = {
+        _planning_tool_cache_key(
+            str(fact.get("tool") or ""),
+            fact.get("arguments") if isinstance(fact.get("arguments"), dict) else {},
+        )
+        for fact in fact_registry.values()
+        if str(fact.get("tool") or "") in transport_tools
+        and _tool_result_has_usable_fact(fact)
+    }
+    destinations = scope.get("destinations")
+    destination_count = len(destinations) if isinstance(destinations, list) else 0
+    if scope.get("needsTransport") and not transport_query_keys:
+        gaps.append("去返程或跨城大交通事实缺失")
+    elif destination_count > 1 and len(transport_query_keys) < destination_count:
+        gaps.append("多城转场交通覆盖不足")
+
+    if scope.get("needsHotel"):
+        hotel_fact_found = any(
+            fact.get("tool")
+            in {
+                tool_specs.TOOL_AMAP_POI_SEARCH,
+                tool_specs.TOOL_AMAP_POI_DETAIL,
+            }
+            and any(
+                marker in json.dumps(
+                    fact.get("arguments") or {}, ensure_ascii=False
+                ).lower()
+                for marker in ("酒店", "住宿", "hotel")
+            )
+            for fact in fact_registry.values()
+        )
+        if not hotel_fact_found:
+            gaps.append("过夜城市的酒店落点缺失")
+
+    if scope.get("needsTransport") and tool_specs.TOOL_AMAP_ROUTE not in tool_names:
+        gaps.append("酒店、车站/机场或主要景点的关键路线缺失")
+
+    critical_markers = (
+        "去程",
+        "返程",
+        "往返",
+        "航班",
+        "飞机",
+        "铁路",
+        "火车",
+        "车次",
+        "跨城",
+        "转场",
+        "酒店",
+        "住宿",
+        "关键路线",
+        "接驳",
+    )
+    critical_remaining = [
+        query
+        for query in remaining_queries
+        if any(marker in query.lower() for marker in critical_markers)
+    ]
+    if critical_remaining:
+        gaps.append("模型标记仍待查：" + "；".join(critical_remaining[:4]))
+    return list(dict.fromkeys(gaps))
+
+
 def _planning_tool_cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
     return f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
 
@@ -2010,14 +2255,23 @@ def _generate_itinerary_from_research(
             with timed_stage("planning_parse_model_json", path="research_final"):
                 return output_parser.parse_model_json(final.content, ItineraryData)
         except AIGenerationError as exc:
+            field_repaired = _repair_final_json_fields(
+                invalid_content=final.content,
+                parse_error=exc,
+                planning_model=planning_model,
+            )
+            if field_repaired is not None:
+                return field_repaired
             messages.extend(
                 [
                     {"role": "assistant", "content": final.content},
                     {
                         "role": "user",
                         "content": (
-                            f"上一次 JSON 未通过校验：{exc}。只修复结构并输出完整合法 JSON，"
+                            "字段级补丁无法完成修复。请根据以下精确诊断修复结构，"
+                            "只输出完整合法 JSON，"
                             "不得调用工具或添加解释。"
+                            f"\n【错误诊断】{_model_output_error_detail(exc, final.content)}"
                         ),
                     },
                 ]
@@ -2025,7 +2279,7 @@ def _generate_itinerary_from_research(
             repaired = vivo_chat_client.chat_messages(
                 messages=messages,
                 tools=None,
-                stage="planning_final_repair",
+                stage="planning_final_full_repair",
                 temperature=0.1,
                 max_completion_tokens=(
                     10000 if planning_model in DEEPSEEK_PLANNING_MODELS else 12000
@@ -2043,6 +2297,143 @@ def _generate_itinerary_from_research(
             if repaired.content:
                 return output_parser.parse_model_json(repaired.content, ItineraryData)
     raise AIGenerationError("行程规划生成失败：模型未返回合法 JSON")
+
+
+def _repair_final_json_fields(
+    *,
+    invalid_content: str,
+    parse_error: AIGenerationError,
+    planning_model: PlanningModel,
+) -> ItineraryData | None:
+    """Ask for a bounded field patch when the original JSON is parseable."""
+    cause = parse_error.__cause__
+    if not isinstance(cause, ValidationError):
+        log_event(
+            "planning_final_field_patch",
+            status="skipped",
+            reason="json_not_parseable_or_no_field_paths",
+        )
+        return None
+    try:
+        original = json.loads(output_parser.extract_first_json(invalid_content))
+    except (AIGenerationError, json.JSONDecodeError, TypeError):
+        log_event(
+            "planning_final_field_patch",
+            status="skipped",
+            reason="json_document_unavailable",
+        )
+        return None
+    if not isinstance(original, dict):
+        return None
+
+    allowed_paths = [
+        list(item.get("loc") or ())
+        for item in cause.errors()
+        if item.get("loc")
+    ][:12]
+    if not allowed_paths:
+        return None
+    diagnostic = _model_output_error_detail(parse_error, invalid_content)
+    log_event(
+        "planning_final_field_patch",
+        status="start",
+        allowed_paths=allowed_paths,
+        error_detail=diagnostic,
+        planning_model=planning_model,
+    )
+    patch_prompt = (
+        "你是 JSON 字段补丁器。不得重写整份行程，只能修改允许路径中的错误字段。"
+        "输出一个 JSON 对象：{\"patches\":[{\"path\":[\"itinerary\",0,...],"
+        "\"value\":<替换后的值>}]} 。path 必须与允许路径完全一致，不得增删其他字段。\n"
+        f"【允许路径】{json.dumps(allowed_paths, ensure_ascii=False)}\n"
+        f"【错误诊断】{diagnostic}\n"
+        f"【原 JSON】{json.dumps(original, ensure_ascii=False)}"
+    )
+    try:
+        turn = vivo_chat_client.chat_messages(
+            messages=[
+                {"role": "system", "content": "只输出合法 JSON 字段补丁，不要解释。"},
+                {"role": "user", "content": patch_prompt},
+            ],
+            tools=None,
+            stage="planning_final_field_patch",
+            temperature=0.0,
+            max_completion_tokens=3000,
+            planning_model=planning_model,
+            response_format=(
+                {"type": "json_object"}
+                if planning_model in DEEPSEEK_PLANNING_MODELS
+                else None
+            ),
+            thinking_enabled=(
+                False if planning_model in DEEPSEEK_PLANNING_MODELS else None
+            ),
+        )
+        if not turn.content:
+            raise ValueError("empty patch response")
+        payload = json.loads(output_parser.extract_first_json(turn.content))
+        patches = payload.get("patches") if isinstance(payload, dict) else None
+        if not isinstance(patches, list) or not patches:
+            raise ValueError("patches must be a non-empty list")
+        allowed = {_json_path_key(path) for path in allowed_paths}
+        patched = deepcopy(original)
+        applied_paths: list[list[Any]] = []
+        for item in patches[:12]:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), list):
+                raise ValueError("invalid patch entry")
+            path = item["path"]
+            if _json_path_key(path) not in allowed:
+                raise ValueError("patch path outside validation errors")
+            _set_json_path(patched, path, item.get("value"))
+            applied_paths.append(path)
+        result = ItineraryData.model_validate(patched)
+        log_event(
+            "planning_final_field_patch",
+            status="success",
+            patch_count=len(applied_paths),
+            applied_paths=applied_paths,
+            response_chars=len(turn.content),
+            planning_model=planning_model,
+        )
+        return result
+    except (AIGenerationError, ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        log_event(
+            "planning_final_field_patch",
+            status="failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:1000],
+            planning_model=planning_model,
+        )
+        return None
+
+
+def _json_path_key(path: list[Any]) -> str:
+    return json.dumps(path, ensure_ascii=False, separators=(",", ":"))
+
+
+def _set_json_path(document: dict[str, Any], path: list[Any], value: Any) -> None:
+    if not path:
+        raise ValueError("root replacement is not allowed")
+    current: Any = document
+    for part in path[:-1]:
+        if isinstance(current, dict) and isinstance(part, str) and part in current:
+            current = current[part]
+        elif (
+            isinstance(current, list)
+            and isinstance(part, int)
+            and 0 <= part < len(current)
+        ):
+            current = current[part]
+        else:
+            raise ValueError("patch parent path does not exist")
+    leaf = path[-1]
+    if isinstance(current, dict) and isinstance(leaf, str):
+        current[leaf] = value
+        return
+    if isinstance(current, list) and isinstance(leaf, int) and 0 <= leaf < len(current):
+        current[leaf] = value
+        return
+    raise ValueError("patch leaf path is invalid")
 
 
 def _audit_itinerary(
