@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     VIVO_MAX_RETRY: int = 1
     VIVO_RETRY_BACKOFF_SECONDS: float = 1.0
     VIVO_IMAGE_SEQUENTIAL_GENERATION: str = "disabled"
+    # —— DeepSeek OpenAI-compatible planning models ——
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_CHAT_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_FLASH_MODEL: str = "deepseek-v4-flash"
+    DEEPSEEK_PRO_MODEL: str = "deepseek-v4-pro"
     PHOTO_ANALYZE_PARALLELISM: int = 5
     GENERATION_FILE_IO_PARALLELISM: int = 4
     GENERATION_IMAGE_PARALLELISM: int = 2

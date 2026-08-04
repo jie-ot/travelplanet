@@ -7,6 +7,7 @@ import type {
   Plan,
   PlanningBrief,
   PlanningChatMessage,
+  PlanningModel,
   PlanningResponse,
   PostcardGroup,
   Report,
@@ -27,6 +28,7 @@ export interface GenerateResult {
 
 export interface PlanWithAIInput {
   message: string
+  planningModel: PlanningModel
   context: ItineraryData | null
   messages?: PlanningChatMessage[]
   brief?: PlanningBrief | null

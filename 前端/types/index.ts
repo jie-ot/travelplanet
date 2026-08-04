@@ -122,10 +122,15 @@ export interface Plan {
 /* ---------------- 多轮旅行规划会话 ---------------- */
 
 export type PlanningPhase = "collecting" | "confirming" | "completed"
+export type PlanningModel =
+  | "doubao-seed-2.0-pro"
+  | "deepseek-v4-flash"
+  | "deepseek-v4-pro"
 
 export interface PlanningChatMessage {
   role: "user" | "assistant"
   content: string
+  planningModel?: PlanningModel
 }
 
 export interface PlanningBrief {
@@ -154,6 +159,7 @@ export interface PlanningChecklistItem {
 export interface PlanningResponse {
   phase: PlanningPhase
   assistantMessage: string
+  planningModel: PlanningModel
   brief: PlanningBrief | null
   checklist: PlanningChecklistItem[]
   itinerary: ItineraryData | null

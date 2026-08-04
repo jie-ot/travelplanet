@@ -7,17 +7,18 @@ import {
   CheckCircle2,
   CircleAlert,
   ClipboardCheck,
-  MessageCircleMore,
   Send,
   Sparkles,
   WandSparkles,
 } from "lucide-react"
-import type { PlanningChecklistItem, PlanningPhase } from "@/types"
+import { PlanningModelSelector } from "@/components/shared/planning-model-selector"
+import type { PlanningChecklistItem, PlanningModel, PlanningPhase } from "@/types"
 
 export interface PlanningConversationMessage {
   id: string
   role: "user" | "assistant"
   content: string
+  planningModel?: PlanningModel
 }
 
 interface PlanningConversationProps {
@@ -26,7 +27,10 @@ interface PlanningConversationProps {
   checklist: PlanningChecklistItem[]
   value: string
   busy: boolean
+  planningModel: PlanningModel
+  modelLocked: boolean
   onChange: (value: string) => void
+  onModelChange: (model: PlanningModel) => void
   onSend: () => void
   onConfirm: () => void
 }
@@ -39,7 +43,10 @@ export function PlanningConversation({
   checklist,
   value,
   busy,
+  planningModel,
+  modelLocked,
   onChange,
+  onModelChange,
   onSend,
   onConfirm,
 }: PlanningConversationProps) {
@@ -56,26 +63,12 @@ export function PlanningConversation({
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="planning-conversation">
       <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar">
-        <div className="space-y-5 px-4 pb-6 pt-5 min-[400px]:px-5">
-          <section className="overflow-hidden rounded-[1.45rem] border border-white/10 bg-[linear-gradient(140deg,#063e5d_0%,#075c72_55%,#087d8d_100%)] px-5 py-5 text-white shadow-[0_20px_42px_-28px_rgba(3,47,71,0.9)]">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-2 text-[#84e3e3]">
-                  <MessageCircleMore className="h-4 w-4" aria-hidden />
-                  <span className="text-xs font-bold tracking-[0.14em]">先聊清楚，再出发</span>
-                </div>
-                <h2 className="mt-2 font-display text-xl font-bold tracking-tight">
-                  和星球一起把旅程想明白
-                </h2>
-                <p className="mt-2 max-w-[26rem] text-sm leading-6 text-white/70">
-                  我会先理解和追问，整理成清单。只有你确认后，才会查询事实并生成完整行程。
-                </p>
-              </div>
-              <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-white/10 ring-1 ring-white/15">
-                <Sparkles className="h-5 w-5 text-[#8ce6e4]" aria-hidden />
-              </span>
-            </div>
-            <ol className="mt-5 grid grid-cols-3 gap-2" aria-label="规划步骤">
+        <div className="space-y-4 px-4 pb-5 pt-4 min-[400px]:px-5">
+          <section className="overflow-hidden rounded-[1.35rem] border border-white/15 bg-[linear-gradient(145deg,#07516b_0%,#087b88_100%)] px-4 py-3.5 text-white shadow-[0_16px_34px_-26px_rgba(3,47,71,0.95)] ring-1 ring-[#b8ece7]/10">
+            <p className="text-[13px] font-medium leading-5 text-white/82">
+              我会先理解和追问，整理成清单。只有你确认后，才会查询事实并生成完整行程。
+            </p>
+            <ol className="mt-3 grid grid-cols-3 gap-2" aria-label="规划步骤">
               {STEP_LABELS.map((label, index) => {
                 const activeIndex = phase === "confirming" ? 1 : 0
                 const done = index < activeIndex
@@ -83,7 +76,7 @@ export function PlanningConversation({
                 return (
                   <li
                     key={label}
-                    className={`rounded-xl px-2 py-2 text-center text-[11px] font-semibold ${
+                    className={`rounded-xl px-2 py-1.5 text-center text-[11px] font-semibold ${
                       active
                         ? "bg-white text-[#07516c]"
                         : done
@@ -91,7 +84,7 @@ export function PlanningConversation({
                           : "bg-black/10 text-white/46"
                     }`}
                   >
-                    <span className="mx-auto mb-1 grid size-5 place-items-center rounded-full border border-current/30">
+                    <span className="mx-auto mb-0.5 grid size-4 place-items-center rounded-full border border-current/30 text-[10px]">
                       {done ? <Check className="h-3 w-3" /> : index + 1}
                     </span>
                     {label}
@@ -100,6 +93,15 @@ export function PlanningConversation({
               })}
             </ol>
           </section>
+
+          {!modelLocked ? (
+            <PlanningModelSelector
+              value={planningModel}
+              locked={modelLocked}
+              disabled={busy}
+              onChange={onModelChange}
+            />
+          ) : null}
 
           <div className="space-y-4" aria-live="polite">
             {messages.map((message) => (
@@ -263,9 +265,6 @@ export function PlanningConversation({
             <Send className="h-5 w-5" aria-hidden />
           </button>
         </div>
-        <p className="mt-2 text-center text-[10px] text-muted-foreground">
-          Enter 发送 · Shift + Enter 换行
-        </p>
       </div>
     </div>
   )

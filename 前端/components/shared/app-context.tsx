@@ -8,6 +8,7 @@ import type {
   BusinessCode,
   PageType,
   Plan,
+  PlanningModel,
   PlanningResponse,
   PostcardGroup,
   Report,
@@ -176,7 +177,7 @@ interface AppContextValue {
   hasUnsavedDraft: boolean
   planning: boolean
   planningTurn: (input: PlanWithAIInput) => Promise<PlanningResponse | null>
-  planRefine: (message: string) => Promise<ItineraryData | null>
+  planRefine: (message: string, planningModel: PlanningModel) => Promise<ItineraryData | null>
   beginNewPlan: () => void
   beginEditPlan: (plan: Plan) => void
   updateDraft: (data: ItineraryData) => void
@@ -519,12 +520,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // 已生成行程的后续打磨仍视为用户对当前版本的明确修改请求。
   const planRefine = useCallback(
-    async (message: string): Promise<ItineraryData | null> => {
+    async (message: string, planningModel: PlanningModel): Promise<ItineraryData | null> => {
       if (!draftItineraryData) return null
       const response = await planningTurn({
         message,
+        planningModel,
         context: draftItineraryData,
-        messages: [{ role: "user", content: message }],
+        messages: [{ role: "user", content: message, planningModel }],
         confirmed: true,
       })
       return response?.itinerary ?? null

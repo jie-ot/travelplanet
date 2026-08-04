@@ -6,9 +6,23 @@ from unittest.mock import patch
 
 from app.ai import orchestrator
 from app.ai.clients.vivo_chat_client import ChatTurn, ToolCall
+from app.ai.prompts import load_prompt
 
 
 class PlanningProtocolTest(TestCase):
+    def test_planning_prompt_defines_transport_thresholds_and_flexible_mobility(
+        self,
+    ) -> None:
+        prompt = load_prompt("planning_skill.md")
+
+        self.assertIn("最快高铁不超过 5 小时（含 5 小时）时优先高铁", prompt)
+        self.assertIn("超过 5 小时但不足 7 小时时", prompt)
+        self.assertIn("达到或超过 7 小时时优先飞机", prompt)
+        self.assertIn("直达优先但不是硬规则", prompt)
+        self.assertIn("可以选择铁路换乘或不同交通方式联程", prompt)
+        self.assertIn("可组合公交地铁、步行、骑行、打车/自驾", prompt)
+        self.assertIn("硬性偏好时必须服从", prompt)
+
     def test_scope_fact_state_finish_then_final_and_audit(self) -> None:
         itinerary = {
             "trip_info": {
@@ -33,6 +47,7 @@ class PlanningProtocolTest(TestCase):
         turns = iter(
             [
                 ChatTurn(
+                    reasoning_content="scope reasoning",
                     tool_calls=[
                         ToolCall(
                             id="scope",
@@ -59,6 +74,7 @@ class PlanningProtocolTest(TestCase):
                     ]
                 ),
                 ChatTurn(
+                    reasoning_content="finish reasoning",
                     tool_calls=[
                         ToolCall(
                             id="finish",
@@ -74,9 +90,11 @@ class PlanningProtocolTest(TestCase):
             ]
         )
         external_calls: list[str] = []
+        model_calls: list[dict] = []
         business_events: list[tuple[str, dict]] = []
 
-        def fake_chat_messages(**_kwargs) -> ChatTurn:
+        def fake_chat_messages(**kwargs) -> ChatTurn:
+            model_calls.append(kwargs)
             return next(turns)
 
         def fake_execute(tool_name: str, _arguments: dict) -> dict:
@@ -109,10 +127,26 @@ class PlanningProtocolTest(TestCase):
                 ),
             ),
         ):
-            result = orchestrator._plan_with_tools("system", "user", fake_execute)
+            result = orchestrator._plan_with_tools(
+                "system",
+                "user",
+                fake_execute,
+                planning_model="deepseek-v4-pro",
+            )
 
         self.assertEqual(result.trip_info.destination, "苏州")
         self.assertEqual(external_calls, ["amap_poi_search"])
+        self.assertTrue(model_calls)
+        self.assertTrue(
+            all(call["planning_model"] == "deepseek-v4-pro" for call in model_calls)
+        )
+        second_round_messages = model_calls[1]["messages"]
+        first_assistant = next(
+            message
+            for message in second_round_messages
+            if message["role"] == "assistant"
+        )
+        self.assertEqual(first_assistant["reasoning_content"], "scope reasoning")
         round_results = [
             fields
             for event, fields in business_events

@@ -9,9 +9,12 @@ import {
   type PlanningConversationMessage,
 } from "@/components/shared/planning-conversation"
 import { PlanningProgress } from "@/components/shared/planning-progress"
+import { PlanningModelSelector } from "@/components/shared/planning-model-selector"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import { Sparkles, Save, RotateCcw, History, Send } from "lucide-react"
-import type { PlanningBrief, PlanningChecklistItem } from "@/types"
+import type { PlanningBrief, PlanningChecklistItem, PlanningModel } from "@/types"
+
+const DEFAULT_PLANNING_MODEL: PlanningModel = "doubao-seed-2.0-pro"
 
 const INITIAL_MESSAGES: PlanningConversationMessage[] = [
   {
@@ -50,6 +53,9 @@ export function PlanningView() {
   const [checklist, setChecklist] = useState<PlanningChecklistItem[]>([])
   const [conversationPhase, setConversationPhase] =
     useState<"collecting" | "confirming">("collecting")
+  const [selectedModel, setSelectedModel] =
+    useState<PlanningModel>(DEFAULT_PLANNING_MODEL)
+  const [refinementModelLocked, setRefinementModelLocked] = useState(false)
   const [generationRequested, setGenerationRequested] = useState(false)
   // 未保存草稿返回拦截（规范 §10.5）
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
@@ -63,6 +69,10 @@ export function PlanningView() {
       : draftItineraryData
         ? "result"
         : "conversation"
+  const conversationModelLocked = chatMessages.some(
+    (message) => !!message.planningModel,
+  )
+  const resultModelLocked = conversationModelLocked || refinementModelLocked
 
   async function handleConversationSend() {
     const text = prompt.trim()
@@ -74,6 +84,7 @@ export function PlanningView() {
       id: `user-${Date.now()}`,
       role: "user",
       content: text,
+      planningModel: selectedModel,
     }
     const nextMessages = [...chatMessages, userMessage]
     setChatMessages(nextMessages)
@@ -81,8 +92,13 @@ export function PlanningView() {
     setSaved(false)
     const response = await planningTurn({
       message: text,
+      planningModel: selectedModel,
       context: null,
-      messages: nextMessages.map(({ role, content }) => ({ role, content })),
+      messages: nextMessages.map(({ role, content, planningModel }) => ({
+        role,
+        content,
+        planningModel,
+      })),
       brief,
       confirmed: false,
     })
@@ -97,6 +113,7 @@ export function PlanningView() {
           id: `assistant-${Date.now()}`,
           role: "assistant",
           content: response.assistantMessage,
+          planningModel: response.planningModel,
         },
       ])
     }
@@ -109,14 +126,20 @@ export function PlanningView() {
       id: `user-confirm-${Date.now()}`,
       role: "user",
       content: confirmationText,
+      planningModel: selectedModel,
     }
     const nextMessages = [...chatMessages, userMessage]
     setChatMessages(nextMessages)
     setGenerationRequested(true)
     const response = await planningTurn({
       message: confirmationText,
+      planningModel: selectedModel,
       context: null,
-      messages: nextMessages.map(({ role, content }) => ({ role, content })),
+      messages: nextMessages.map(({ role, content, planningModel }) => ({
+        role,
+        content,
+        planningModel,
+      })),
       brief,
       confirmed: true,
     })
@@ -132,6 +155,7 @@ export function PlanningView() {
           id: `assistant-confirm-${Date.now()}`,
           role: "assistant",
           content: response.assistantMessage,
+          planningModel: response.planningModel,
         },
       ])
     }
@@ -145,7 +169,8 @@ export function PlanningView() {
     }
     setSaved(false)
     setRefinePrompt("")
-    const result = await planRefine(text)
+    setRefinementModelLocked(true)
+    const result = await planRefine(text, selectedModel)
     if (result) toast("已根据你的调整重新打磨规划", "success")
   }
 
@@ -167,6 +192,8 @@ export function PlanningView() {
     setBrief(null)
     setChecklist([])
     setConversationPhase("collecting")
+    setSelectedModel(DEFAULT_PLANNING_MODEL)
+    setRefinementModelLocked(false)
     setGenerationRequested(false)
   }
 
@@ -175,6 +202,8 @@ export function PlanningView() {
     setPrompt("")
     setRefinePrompt("")
     setSaved(false)
+    setSelectedModel(DEFAULT_PLANNING_MODEL)
+    setRefinementModelLocked(false)
     action()
   }
 
@@ -246,7 +275,10 @@ export function PlanningView() {
             checklist={checklist}
             value={prompt}
             busy={planning}
+            planningModel={selectedModel}
+            modelLocked={conversationModelLocked}
             onChange={setPrompt}
+            onModelChange={setSelectedModel}
             onSend={() => void handleConversationSend()}
             onConfirm={() => void handleConfirmPlan()}
           />
@@ -276,6 +308,17 @@ export function PlanningView() {
       {/* 结果态底部操作区：对话式打磨 + 保存 */}
       {phase === "result" && draftItineraryData && (
         <div className="border-t border-[#0a3850]/12 bg-card/96 px-4 py-3 shadow-[0_-12px_30px_-24px_rgba(6,45,72,0.65)] backdrop-blur min-[400px]:px-5 min-[400px]:py-4">
+          {!resultModelLocked ? (
+            <div className="mb-3">
+              <PlanningModelSelector
+                value={selectedModel}
+                locked={resultModelLocked}
+                disabled={planning}
+                compact
+                onChange={setSelectedModel}
+              />
+            </div>
+          ) : null}
           <div className="flex items-end gap-2">
             <textarea
               value={refinePrompt}

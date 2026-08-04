@@ -147,6 +147,19 @@ FRONTEND_ORIGINS=http://localhost:3000,http://192.168.10.222:3000
 
 请把示例中的 `192.168.10.222` 替换为电脑实际的 IPv4 地址。保存 `.env` 后，如果后端已经启动，需要先停止再重新启动，配置才会生效。
 
+### 4.1 配置可选的 DeepSeek 规划模型
+
+规划页默认继续使用当前的 `Doubao-Seed-2.0-pro`，无需增加配置。若要选择 DeepSeek V4 Flash 或 V4 Pro，请在 `.env` 中填写：
+
+```env
+DEEPSEEK_API_KEY=请填写你的DeepSeek_API_Key
+DEEPSEEK_CHAT_BASE_URL=https://api.deepseek.com
+DEEPSEEK_FLASH_MODEL=deepseek-v4-flash
+DEEPSEEK_PRO_MODEL=deepseek-v4-pro
+```
+
+只填写本地 `.env`，不要把真实密钥写入 `.env.example`、代码、日志或提交到 Git。修改后需重启后端。
+
 ## 5. 启动后端
 
 在后端项目根目录的终端执行：

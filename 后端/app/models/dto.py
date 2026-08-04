@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from app.ai.model_selection import DEFAULT_PLANNING_MODEL, PlanningModel
 from app.models.itinerary import ItineraryData
 
 # Outward enums (mirrored from the DB enum table & 1.4/1.5/1.7).
@@ -195,6 +196,9 @@ PlanningChecklistStatus = Literal["ready", "assumed", "missing"]
 class PlanningChatMessage(CamelModel):
     role: PlanningMessageRole
     content: str
+    # Optional for backward compatibility. New clients stamp every real turn so
+    # the stateless endpoint can reject model switching inside one conversation.
+    planning_model: PlanningModel | None = None
 
 
 class PlanningBrief(CamelModel):
@@ -224,6 +228,7 @@ class PlanningChecklistItem(CamelModel):
 
 class PlanningRequest(CamelModel):
     message: str
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL
     # New plans collect requirements first. Existing plans may still be refined
     # directly by passing context + confirmed=true.
     context: ItineraryData | None = None
@@ -235,6 +240,7 @@ class PlanningRequest(CamelModel):
 class PlanningResponse(CamelModel):
     phase: PlanningPhase
     assistant_message: str
+    planning_model: PlanningModel
     brief: PlanningBrief | None = None
     checklist: list[PlanningChecklistItem] = Field(default_factory=list)
     itinerary: ItineraryData | None = None

@@ -23,6 +23,8 @@ def ai_planning(
         user_id=current_user_id,
         has_context=payload.context is not None,
         message_chars=len(payload.message or ""),
+        planning_model=payload.planning_model,
+        conversation_turns=len(payload.messages),
     ):
         result = planning_service.plan(current_user_id, payload)
     return success(result.model_dump())

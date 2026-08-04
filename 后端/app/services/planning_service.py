@@ -38,10 +38,30 @@ from app.services import (
 logger = logging.getLogger("travelplanet")
 
 
+def _validate_conversation_model(request: PlanningRequest) -> None:
+    """Reject attempts to switch a model inside the supplied chat history."""
+    historical_models = {
+        message.planning_model
+        for message in request.messages
+        if message.planning_model is not None
+    }
+    if not historical_models or historical_models == {request.planning_model}:
+        return
+    log_event(
+        "planning_model_switch_blocked",
+        status="rejected",
+        requested_model=request.planning_model,
+        historical_models=sorted(historical_models),
+        conversation_turns=len(request.messages),
+    )
+    raise InvalidParamError("一次规划对话只能使用一个模型；请重新开始规划后再切换")
+
+
 def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
     """Advance requirement chat or generate after explicit confirmation."""
     if not request.message or not request.message.strip():
         raise InvalidParamError("规划需求不能为空")
+    _validate_conversation_model(request)
 
     with timed_stage("planning_read_memory"):
         with session_scope() as session:
@@ -70,6 +90,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                 return PlanningResponse(
                     phase="collecting",
                     assistant_message=_missing_fields_message(missing),
+                    planning_model=request.planning_model,
                     brief=brief,
                     checklist=planning_intake_service.build_checklist(brief),
                 )
@@ -83,6 +104,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                 destination_count=len(brief.destinations),
                 start_date=brief.start_date,
                 end_date=brief.end_date,
+                planning_model=request.planning_model,
             )
 
         # Do not pre-inject ready-made B-class guidance. A/A′ facts are obtained
@@ -97,6 +119,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             is_refinement=request.context is not None,
             message_chars=len(planning_message),
             message_excerpt=_excerpt(planning_message),
+            planning_model=request.planning_model,
         )
         fact_pack_dict = None
         if travel_fact_service.needs_facts(planning_message, request.context):
@@ -143,6 +166,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             request_id=request_id,
             is_refinement=request.context is not None,
             protocol="declare_scope_fact_state_finish_audit_v1",
+            planning_model=request.planning_model,
         )
 
         # Function-calling executor: the model proposes whitelist tools; the
@@ -162,6 +186,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             request_id=request_id,
             is_refinement=request.context is not None,
             protocol="declare_scope_fact_state_finish_audit_v1",
+            planning_model=request.planning_model,
         ):
             new_data = orchestrator.plan_itinerary(
                 message=planning_message,
@@ -169,6 +194,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                 memory_summary=memory_summary,
                 fact_pack=fact_pack_dict,
                 execute_tool=_execute_tool,
+                planning_model=request.planning_model,
             )
         # Schedule order is deterministic, so correct model ordering mistakes
         # before positional stable-ID alignment and business validation.
@@ -203,10 +229,12 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             day_count=len(aligned.itinerary),
             request_id=request_id,
             structure=_summarize_itinerary(aligned),
+            planning_model=request.planning_model,
         )
         return PlanningResponse(
             phase="completed",
             assistant_message="行程已经生成完成，你还可以继续告诉我想怎么调整。",
+            planning_model=request.planning_model,
             brief=request.brief,
             itinerary=aligned,
         )
@@ -227,16 +255,24 @@ def _collect_requirements(
         messages[-1].role != "user"
         or messages[-1].content.strip() != request.message.strip()
     ):
-        messages.append(PlanningChatMessage(role="user", content=request.message))
+        messages.append(
+            PlanningChatMessage(
+                role="user",
+                content=request.message,
+                planning_model=request.planning_model,
+            )
+        )
     with timed_stage(
         "planning_collect_requirements",
         conversation_turns=len(messages),
         has_previous_brief=request.brief is not None,
+        planning_model=request.planning_model,
     ):
         intake = orchestrator.collect_planning_requirements(
             messages=messages,
             previous_brief=request.brief,
             memory_summary=memory_summary,
+            planning_model=request.planning_model,
         )
     brief = planning_intake_service.normalize_brief(intake.brief)
     missing = planning_intake_service.missing_required_fields(brief)
@@ -255,10 +291,12 @@ def _collect_requirements(
         conversation_turns=len(messages),
         missing_fields=missing,
         checklist_status_counts=_count_values(item.status for item in checklist),
+        planning_model=request.planning_model,
     )
     return PlanningResponse(
         phase=phase,
         assistant_message=assistant_message,
+        planning_model=request.planning_model,
         brief=brief,
         checklist=checklist,
     )

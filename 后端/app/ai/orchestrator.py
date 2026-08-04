@@ -25,6 +25,11 @@ from app.ai import output_parser
 from app.ai.clients import vivo_chat_client, vivo_image_client
 from app.ai.clients.vivo_image_client import ImageGenerationResult
 from app.ai.memory import context_builder
+from app.ai.model_selection import (
+    DEFAULT_PLANNING_MODEL,
+    PlanningModel,
+    requires_reasoning_replay,
+)
 from app.ai.prompts import load_prompt
 from app.ai.schemas import (
     MemoryUpdateResult,
@@ -848,6 +853,7 @@ def plan_itinerary(
     memory_summary: str,
     fact_pack: dict[str, Any] | None = None,
     execute_tool: ToolExecutor | None = None,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
 ) -> ItineraryData:
     """Planning → full ItineraryData.
 
@@ -866,9 +872,14 @@ def plan_itinerary(
         fact_pack=fact_pack,
     )
     if execute_tool is not None:
-        return _plan_with_tools(system_prompt, user_text, execute_tool)
+        return _plan_with_tools(
+            system_prompt,
+            user_text,
+            execute_tool,
+            planning_model=planning_model,
+        )
 
-    return _plan_plain(system_prompt, user_text)
+    return _plan_plain(system_prompt, user_text, planning_model=planning_model)
 
 
 def _load_planning_system_prompt() -> str:
@@ -885,8 +896,40 @@ def _load_planning_system_prompt() -> str:
     )
 
 
+def _assistant_history_message(
+    turn: vivo_chat_client.ChatTurn,
+    planning_model: PlanningModel,
+) -> dict[str, Any]:
+    """Serialize an assistant turn for the next provider request.
+
+    DeepSeek requires the complete `reasoning_content` to be replayed after
+    every request carrying tools. The field remains provider-only: it is never
+    logged as text, persisted, or returned through application DTOs.
+    """
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": turn.content,
+    }
+    if turn.tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.name, "arguments": tc.arguments},
+            }
+            for tc in turn.tool_calls
+        ]
+    if requires_reasoning_replay(planning_model):
+        message["reasoning_content"] = turn.reasoning_content or ""
+    return message
+
+
 def _plan_with_tools(
-    system_prompt: str, user_text: str, execute_tool: ToolExecutor
+    system_prompt: str,
+    user_text: str,
+    execute_tool: ToolExecutor,
+    *,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
 ) -> ItineraryData:
     """Research protocol: declare scope → gather/select facts → finish → final + audit."""
     messages: list[dict[str, Any]] = [
@@ -917,12 +960,14 @@ def _plan_with_tools(
             remaining_queries=remaining_queries,
             cache_entry_count=len(result_cache),
             research_finished=research_summary is not None,
+            planning_model=planning_model,
         )
         turn = vivo_chat_client.chat_messages(
             messages=messages,
             tools=tool_specs.PLANNING_TOOLS,
             stage="planning_research",
             max_completion_tokens=16000,
+            planning_model=planning_model,
         )
         log_event(
             "planning_tool_round_result",
@@ -943,14 +988,10 @@ def _plan_with_tools(
             fact_registry_count=len(fact_registry),
             retained_fact_count=len(retained_facts),
             remaining_query_count=len(remaining_queries),
+            planning_model=planning_model,
         )
         if not turn.tool_calls:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": turn.content or "",
-                }
-            )
+            messages.append(_assistant_history_message(turn, planning_model))
             messages.append(
                 {
                     "role": "user",
@@ -965,20 +1006,7 @@ def _plan_with_tools(
         external_in_turn = any(
             tc.name in tool_specs.ARG_SCHEMAS for tc in turn.tool_calls
         )
-        messages.append(
-            {
-                "role": "assistant",
-                "content": turn.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.name, "arguments": tc.arguments},
-                    }
-                    for tc in turn.tool_calls
-                ],
-            }
-        )
+        messages.append(_assistant_history_message(turn, planning_model))
         called_names: list[str] = []
         for call_index, tc in enumerate(turn.tool_calls, start=1):
             called_names.append(tc.name)
@@ -1154,12 +1182,14 @@ def _plan_with_tools(
         retained_facts=retained_facts,
         research_summary=research_summary,
         stage="planning_final",
+        planning_model=planning_model,
     )
     audit = _audit_itinerary(
         user_text=user_text,
         scope=scope,
         retained_facts=retained_facts,
         itinerary=final_data,
+        planning_model=planning_model,
     )
     if audit is None or audit.passed or not audit.missing_queries:
         return final_data
@@ -1202,6 +1232,7 @@ def _plan_with_tools(
             "revision": "已完成最多一轮审稿补查，请修复问题并重新生成",
         },
         stage="planning_review_regeneration",
+        planning_model=planning_model,
     )
 
 
@@ -1210,6 +1241,7 @@ def collect_planning_requirements(
     messages: list[PlanningChatMessage],
     previous_brief: PlanningBrief | None,
     memory_summary: str,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
 ) -> PlanningIntakeResult:
     """Run one lightweight conversational intake turn without travel tools."""
     current_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
@@ -1241,6 +1273,7 @@ def collect_planning_requirements(
         "planning_intake_model",
         conversation_turns=len(bounded_messages),
         has_previous_brief=previous_brief is not None,
+        planning_model=planning_model,
     ):
         raw = vivo_chat_client.chat_json(
             task=vivo_chat_client.TASK_PLANNING_INTAKE,
@@ -1248,6 +1281,7 @@ def collect_planning_requirements(
             user_text=user_text,
             temperature=0.2,
             max_completion_tokens=3000,
+            planning_model=planning_model,
         )
     return output_parser.parse_model_json(raw, PlanningIntakeResult)
 
@@ -1382,6 +1416,7 @@ def _generate_itinerary_from_research(
     retained_facts: dict[str, dict[str, Any]],
     research_summary: dict[str, Any],
     stage: str,
+    planning_model: PlanningModel,
 ) -> ItineraryData:
     compact_user = (
         f"{user_text}\n\n【模型已声明的旅行范围】\n"
@@ -1401,6 +1436,7 @@ def _generate_itinerary_from_research(
         stage=stage,
         temperature=0.2,
         max_completion_tokens=16000,
+        planning_model=planning_model,
     )
     if final.content:
         log_event(
@@ -1415,6 +1451,7 @@ def _generate_itinerary_from_research(
             retained_fact_ids=list(retained_facts),
             retained_fact_tool_counts=_fact_tool_counts(retained_facts),
             research_summary=_summarize_planning_value(research_summary),
+            planning_model=planning_model,
         )
         try:
             with timed_stage("planning_parse_model_json", path="research_final"):
@@ -1438,6 +1475,7 @@ def _generate_itinerary_from_research(
                 stage="planning_final_repair",
                 temperature=0.1,
                 max_completion_tokens=16000,
+                planning_model=planning_model,
             )
             if repaired.content:
                 return output_parser.parse_model_json(repaired.content, ItineraryData)
@@ -1450,6 +1488,7 @@ def _audit_itinerary(
     scope: dict[str, Any],
     retained_facts: dict[str, dict[str, Any]],
     itinerary: ItineraryData,
+    planning_model: PlanningModel,
 ) -> _AuditResult | None:
     audit_prompt = (
         "你是同一旅行规划模型的低温审稿阶段。只检查需求覆盖、跨区通勤依据、关键路线、"
@@ -1477,6 +1516,7 @@ def _audit_itinerary(
             stage="planning_audit",
             temperature=0.1,
             max_completion_tokens=3000,
+            planning_model=planning_model,
         )
         if not turn.content:
             return None
@@ -1719,7 +1759,12 @@ def _safe_json_args(raw: str) -> dict:
         return {}
 
 
-def _plan_plain(system_prompt: str, user_text: str) -> ItineraryData:
+def _plan_plain(
+    system_prompt: str,
+    user_text: str,
+    *,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
+) -> ItineraryData:
     """No-tools planning fallback; one JSON-repair retry allowed."""
     with timed_stage("planning_plain_model"):
         raw = vivo_chat_client.chat_json(
@@ -1727,6 +1772,7 @@ def _plan_plain(system_prompt: str, user_text: str) -> ItineraryData:
             system_prompt=system_prompt,
             user_text=user_text,
             max_completion_tokens=16000,
+            planning_model=planning_model,
         )
     try:
         log_event(
@@ -1753,6 +1799,7 @@ def _plan_plain(system_prompt: str, user_text: str) -> ItineraryData:
                 system_prompt=system_prompt,
                 user_text=repair_text,
                 max_completion_tokens=16000,
+                planning_model=planning_model,
             )
         try:
             log_event(
