@@ -71,6 +71,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
     try:
         if request.context is None and not request.confirmed:
             return _collect_requirements(
+                user_id=user_id,
                 request=request,
                 memory_summary=memory_summary,
             )
@@ -229,6 +230,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             day_count=len(aligned.itinerary),
             request_id=request_id,
             structure=_summarize_itinerary(aligned),
+            itinerary=aligned.model_dump(by_alias=True),
             planning_model=request.planning_model,
         )
         return PlanningResponse(
@@ -247,6 +249,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
 
 def _collect_requirements(
     *,
+    user_id: str,
     request: PlanningRequest,
     memory_summary: str,
 ) -> PlanningResponse:
@@ -262,8 +265,20 @@ def _collect_requirements(
                 planning_model=request.planning_model,
             )
         )
+    request_id = id_service.new_id("toolreq_")
+
+    def _execute_tool(tool_name: str, arguments: dict) -> dict:
+        return travel_fact_service.execute_tool(
+            user_id=user_id,
+            request_id=request_id,
+            task_type="planning_intake",
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+
     with timed_stage(
         "planning_collect_requirements",
+        request_id=request_id,
         conversation_turns=len(messages),
         has_previous_brief=request.brief is not None,
         planning_model=request.planning_model,
@@ -272,6 +287,7 @@ def _collect_requirements(
             messages=messages,
             previous_brief=request.brief,
             memory_summary=memory_summary,
+            execute_tool=_execute_tool,
             planning_model=request.planning_model,
         )
     brief = planning_intake_service.normalize_brief(intake.brief)
@@ -291,6 +307,7 @@ def _collect_requirements(
         conversation_turns=len(messages),
         missing_fields=missing,
         checklist_status_counts=_count_values(item.status for item in checklist),
+        request_id=request_id,
         planning_model=request.planning_model,
     )
     return PlanningResponse(

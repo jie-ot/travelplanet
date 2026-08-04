@@ -9,7 +9,10 @@ structured official entry. Function Calling facts are executed here through
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
+import re
+import threading
 import time
 
 from pydantic import ValidationError
@@ -19,6 +22,8 @@ from app.ai.tools import (
     entry_guides,
     rail_mcp_provider,
     tool_specs,
+    variflight_aviation_provider,
+    variflight_tripmatch_provider,
 )
 from app.ai.tools.schemas import (
     BookingEvidence,
@@ -36,6 +41,7 @@ from app.models.tool_call_log import ToolCallLog
 from app.services import id_service
 
 logger = logging.getLogger("travelplanet")
+_TOOL_LOG_WRITE_LOCK = threading.Lock()
 
 
 def needs_facts(message: str, context: ItineraryData | None) -> bool:
@@ -109,23 +115,27 @@ def _persist_log(
         has_error=normalized_status in {"failed", "timeout"},
     )
     try:
-        with session_scope() as session:
-            session.add(
-                ToolCallLog(
-                    id=id_service.new_tool_call_log_id(),
-                    user_id=user_id,
-                    request_id=request_id,
-                    task_type=task_type,
-                    tool_name=tool_name,
-                    provider=provider,
-                    input_summary=input_summary,
-                    output_summary=output_summary,
-                    status="fallback" if degraded_to_b else normalized_status,
-                    degraded_to_b=degraded_to_b,
-                    latency_ms=latency_ms,
-                    error_code=error_code,
+        # External calls may finish concurrently. Serialize only the SQLite
+        # transaction, not the network work, to avoid non-fatal "database locked"
+        # losses in the audit trail.
+        with _TOOL_LOG_WRITE_LOCK:
+            with session_scope() as session:
+                session.add(
+                    ToolCallLog(
+                        id=id_service.new_tool_call_log_id(),
+                        user_id=user_id,
+                        request_id=request_id,
+                        task_type=task_type,
+                        tool_name=tool_name,
+                        provider=provider,
+                        input_summary=input_summary,
+                        output_summary=output_summary,
+                        status="fallback" if degraded_to_b else normalized_status,
+                        degraded_to_b=degraded_to_b,
+                        latency_ms=latency_ms,
+                        error_code=error_code,
+                    )
                 )
-            )
     except Exception:  # noqa: BLE001
         logger.exception("failed to write tool_call_log (non-fatal)")
 
@@ -216,8 +226,18 @@ def execute_tool(
             return _exec_amap_poi(user_id, request_id, task_type, args)
         if tool_name == tool_specs.TOOL_AMAP_POI_AROUND:
             return _exec_amap_poi_around(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_AMAP_POI_DETAIL:
+            return _exec_amap_poi_detail(user_id, request_id, task_type, args)
         if tool_name == tool_specs.TOOL_AMAP_ROUTE:
             return _exec_amap_route(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES:
+            return _exec_flight_itineraries(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER:
+            return _exec_flight_transfer(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER:
+            return _exec_flight_train_transfer(
+                user_id, request_id, task_type, args
+            )
         if tool_name == tool_specs.TOOL_QUERY_RAIL:
             return _exec_rail(user_id, request_id, task_type, args)
     except Exception as exc:  # noqa: BLE001
@@ -276,8 +296,15 @@ def _diagnostic_value(value, *, depth: int = 0):  # noqa: ANN001, ANN202
 
 def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
+    weather_query = args.adcode
     if amap_provider.is_available():
-        facts = amap_provider.weather_range(args.city, args.start_date, args.end_date)
+        weather_query = weather_query or amap_provider.resolve_city_adcode(args.city)
+        facts = amap_provider.weather_range(
+            weather_query or args.city,
+            args.start_date,
+            args.end_date,
+            display_city=args.city,
+        )
         provider = "amap"
     else:
         facts = [
@@ -301,6 +328,7 @@ def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # n
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={
             "city": args.city,
+            "adcode": weather_query,
             "start_date": args.start_date,
             "end_date": args.end_date,
         },
@@ -311,8 +339,10 @@ def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # n
         "tool": tool_specs.TOOL_AMAP_WEATHER_RANGE,
         "status": status,
         "city": args.city,
+        "adcode": weather_query,
         "start_date": args.start_date,
         "end_date": args.end_date,
+        "forecast_horizon_days": 3,
         "days": [_weather_summary(fact) for fact in facts],
     }
     if status != "ok":
@@ -323,12 +353,18 @@ def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # n
 def _exec_amap_poi(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
     if amap_provider.is_available():
-        facts = amap_provider.poi_search_many(args.keyword, city=args.city, limit=8)
+        facts = amap_provider.poi_search_many(
+            args.keyword,
+            city=args.city,
+            limit=args.limit,
+            types=args.types,
+            city_limit=args.city_limit,
+        )
         provider = "amap"
     else:
         facts = [
             PoiFact(
-                name=args.keyword,
+                name=args.keyword or args.types or "POI",
                 address=None,
                 location=None,
                 category=None,
@@ -346,14 +382,21 @@ def _exec_amap_poi(user_id, request_id, task_type, args) -> dict:  # noqa: ANN00
         status=status,
         degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
-        input_summary={"keyword": args.keyword, "city": args.city},
+        input_summary={
+            "keyword": args.keyword,
+            "types": args.types,
+            "city": args.city,
+            "city_limit": args.city_limit,
+            "limit": args.limit,
+        },
         output_summary={"pois": _poi_list_summary(facts)},
         error_code=None,
     )
     result = {
         "tool": tool_specs.TOOL_AMAP_POI_SEARCH,
         "status": status,
-        "pois": _poi_list_summary(facts[:8]),
+        "count": len(facts),
+        "pois": _poi_list_summary(facts[: args.limit]),
     }
     if status != "ok":
         result["note"] = "未获取到该地点信息，建议以官方/地图实际为准"
@@ -366,16 +409,19 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
     if amap_provider.is_available():
         facts = amap_provider.poi_around(
             args.location,
-            args.keywords,
+            args.keyword,
             radius=args.radius,
             city=city_hint,
-            limit=8,
+            limit=args.limit,
+            types=args.types,
+            city_limit=args.city_limit,
+            sort_rule=args.sort_rule,
         )
         provider = "amap"
     else:
         facts = [
             PoiFact(
-                name=args.keywords,
+                name=args.keyword or args.types or "POI",
                 address=None,
                 location=args.location,
                 category=None,
@@ -395,9 +441,13 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={
             "location": args.location,
-            "keywords": args.keywords,
+            "keyword": args.keyword,
+            "types": args.types,
             "radius": args.radius,
             "city": city_hint,
+            "city_limit": args.city_limit,
+            "limit": args.limit,
+            "sort_rule": args.sort_rule,
         },
         output_summary={"pois": _poi_list_summary(facts)},
         error_code=None,
@@ -405,10 +455,52 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
     result = {
         "tool": tool_specs.TOOL_AMAP_POI_AROUND,
         "status": status,
-        "pois": _poi_list_summary(facts[:8]),
+        "count": len(facts),
+        "pois": _poi_list_summary(facts[: args.limit]),
     }
     if status != "ok":
         result["note"] = "未获取到周边 POI，建议以地图/官方平台实际为准"
+    return result
+
+
+def _exec_amap_poi_detail(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+    started = time.monotonic()
+    if amap_provider.is_available():
+        facts = amap_provider.poi_details(args.poi_ids)
+    else:
+        facts = [
+            PoiFact(
+                name=poi_id,
+                address=None,
+                location=None,
+                category=None,
+                status="provider_not_connected",
+                poi_id=poi_id,
+            )
+            for poi_id in args.poi_ids
+        ]
+    status = _facts_status(facts)
+    _persist_log(
+        user_id,
+        request_id,
+        task_type,
+        tool_name=tool_specs.TOOL_AMAP_POI_DETAIL,
+        provider="amap",
+        status=status,
+        degraded_to_b=False,
+        latency_ms=int((time.monotonic() - started) * 1000),
+        input_summary={"poi_ids": args.poi_ids},
+        output_summary={"pois": _poi_list_summary(facts)},
+        error_code=None,
+    )
+    result = {
+        "tool": tool_specs.TOOL_AMAP_POI_DETAIL,
+        "status": status,
+        "count": len(facts),
+        "pois": _poi_list_summary(facts),
+    }
+    if status != "ok":
+        result["note"] = "部分 POI 详情未获取到，建议以地图/景区官方信息为准"
     return result
 
 
@@ -420,33 +512,52 @@ def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN
         origin_name, destination_name
     )
     if amap_provider.is_available():
-        origin_geo = (
-            None
-            if args.origin_location
-            else amap_provider.geocode_detail(origin_name, city=city_hint)
-        )
-        dest_geo = (
-            None
-            if args.destination_location
-            else amap_provider.geocode_detail(destination_name, city=city_hint)
-        )
-        origin_location = args.origin_location or (
-            origin_geo.location if origin_geo else None
-        )
-        destination_location = args.destination_location or (
-            dest_geo.location if dest_geo else None
-        )
-        if origin_location and destination_location:
-            route_city = city_hint or (origin_geo.adcode if origin_geo else None) or (
-                origin_geo.city if origin_geo else None
+        # Both endpoints are independent prerequisites. Resolve them together;
+        # the actual route request waits for both futures.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            origin_future = pool.submit(
+                _resolve_route_endpoint,
+                origin_name,
+                args.origin_location,
+                city_hint,
+                args.mode,
+                args.origin_adcode,
+                args.origin_citycode,
             )
+            destination_future = pool.submit(
+                _resolve_route_endpoint,
+                destination_name,
+                args.destination_location,
+                city_hint,
+                args.mode,
+                args.destination_adcode,
+                args.destination_citycode,
+            )
+            origin_location, origin_adcode, origin_citycode = origin_future.result()
+            destination_location, destination_adcode, destination_citycode = (
+                destination_future.result()
+            )
+        if origin_location and destination_location:
             fact = amap_provider.route(
                 origin_name,
                 destination_name,
                 origin_location,
                 destination_location,
                 mode=args.mode,
-                city=route_city,
+                origin_poi_id=args.origin_poi_id,
+                destination_poi_id=args.destination_poi_id,
+                origin_adcode=origin_adcode,
+                destination_adcode=destination_adcode,
+                origin_citycode=origin_citycode,
+                destination_citycode=destination_citycode,
+                strategy=args.strategy,
+                alternatives=args.alternatives,
+                waypoint_locations=args.waypoint_locations,
+                destination_type=args.destination_type,
+                vehicle_plate=args.vehicle_plate,
+                car_type=args.car_type,
+                avoid_ferry=args.avoid_ferry,
+                night_service=args.night_service,
             )
         else:
             fact = RouteFact(
@@ -456,6 +567,11 @@ def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN
                 distance_km=None,
                 duration_minutes=None,
                 status="unknown",
+                origin_location=origin_location,
+                destination_location=destination_location,
+                origin_poi_id=args.origin_poi_id,
+                destination_poi_id=args.destination_poi_id,
+                strategy=args.strategy,
             )
         provider = "amap"
     else:
@@ -482,24 +598,58 @@ def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN
             "destination": destination_name,
             "origin_location": args.origin_location,
             "destination_location": args.destination_location,
+            "origin_poi_id": args.origin_poi_id,
+            "destination_poi_id": args.destination_poi_id,
+            "origin_adcode": args.origin_adcode,
+            "destination_adcode": args.destination_adcode,
+            "origin_citycode": args.origin_citycode,
+            "destination_citycode": args.destination_citycode,
             "mode": args.mode,
             "city": city_hint,
+            "strategy": args.strategy,
+            "alternatives": args.alternatives,
+            "waypoint_locations": args.waypoint_locations,
+            "destination_type": args.destination_type,
+            "vehicle_plate_supplied": bool(args.vehicle_plate),
+            "car_type": args.car_type,
+            "avoid_ferry": args.avoid_ferry,
+            "night_service": args.night_service,
         },
         output_summary=_route_summary(fact),
         error_code=None,
     )
-    result = {
-        "tool": tool_specs.TOOL_AMAP_ROUTE,
-        "status": fact.status,
-        "origin": fact.origin,
-        "destination": fact.destination,
-        "mode": fact.mode,
-        "distance_km": fact.distance_km,
-        "duration_minutes": fact.duration_minutes,
-    }
+    result = {"tool": tool_specs.TOOL_AMAP_ROUTE, **_route_summary(fact)}
     if fact.status != "ok":
         result["note"] = "未获取到路线，建议以地图实际导航为准"
     return result
+
+
+def _resolve_route_endpoint(
+    name: str,
+    location: str | None,
+    city_hint: str | None,
+    mode: str,
+    supplied_adcode: str | None,
+    supplied_citycode: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    if location:
+        normalized = amap_provider.normalize_coord(location)
+        detail = None
+        if mode == "transit" and not (supplied_adcode and supplied_citycode):
+            detail = amap_provider.reverse_geocode_detail(normalized)
+        return (
+            normalized,
+            supplied_adcode or (detail.adcode if detail else None),
+            supplied_citycode or (detail.citycode if detail else None),
+        )
+    detail = amap_provider.geocode_detail(name, city=city_hint)
+    if not detail:
+        return None, supplied_adcode, supplied_citycode
+    return (
+        detail.location,
+        supplied_adcode or detail.adcode,
+        supplied_citycode or detail.citycode,
+    )
 
 
 def _booking_summary(guide: BookingEvidence) -> dict:
@@ -513,22 +663,11 @@ def _booking_summary(guide: BookingEvidence) -> dict:
 
 
 def _weather_summary(fact: WeatherFact) -> dict:
-    return {
-        "status": fact.status,
-        "city": fact.city,
-        "date": fact.date,
-        "summary": fact.summary,
-    }
+    return fact.model_dump(exclude_none=True)
 
 
 def _poi_summary(fact: PoiFact) -> dict:
-    return {
-        "status": fact.status,
-        "name": fact.name,
-        "address": fact.address,
-        "location": fact.location,
-        "category": fact.category,
-    }
+    return fact.model_dump(exclude_none=True)
 
 
 def _poi_list_summary(facts: list[PoiFact]) -> list[dict]:
@@ -543,14 +682,7 @@ def _facts_status(facts) -> str:  # noqa: ANN001
 
 
 def _route_summary(fact: RouteFact) -> dict:
-    return {
-        "status": fact.status,
-        "origin": fact.origin,
-        "destination": fact.destination,
-        "mode": fact.mode,
-        "distance_km": fact.distance_km,
-        "duration_minutes": fact.duration_minutes,
-    }
+    return fact.model_dump(exclude_none=True)
 
 
 def _rail_summary(fact: RailFact) -> dict:
@@ -571,6 +703,240 @@ def _rail_summary(fact: RailFact) -> dict:
 
 def _rail_list_summary(facts: list[RailFact]) -> list[dict]:
     return [_rail_summary(fact) for fact in facts]
+
+
+def _tripmatch_output_summary(outcome) -> dict:  # noqa: ANN001
+    payload = outcome.provider_payload
+    upstream_request_id = payload.get("request_id") if isinstance(payload, dict) else None
+    return {
+        "provider_status": outcome.status,
+        "payload_type": type(payload).__name__ if payload is not None else None,
+        "payload_keys": list(payload)[:30] if isinstance(payload, dict) else [],
+        "candidate_count": len(_tripmatch_candidates(payload)),
+        "reported_candidate_count": _reported_candidate_count(
+            payload, outcome.raw_text
+        ),
+        "upstream_request_id": upstream_request_id,
+        "raw_text_chars": len(outcome.raw_text or ""),
+        "parsed_content_blocks": len(outcome.content or []),
+        "error_code": outcome.error_code,
+        "provider_trace_id": outcome.trace_id,
+        "diagnostic_stage": outcome.diagnostic_stage,
+        "http_status": outcome.http_status,
+        "exception_type": outcome.exception_type,
+        "provider_latency_ms": outcome.latency_ms,
+    }
+
+
+def _reported_candidate_count(payload, raw_text: str | None) -> int | None:  # noqa: ANN001
+    text_parts = [raw_text or ""]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), str):
+        text_parts.insert(0, payload["data"])
+    for text in text_parts:
+        match = re.search(r"查询到了\s*(\d+)\s*条", text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _tripmatch_candidates(value, *, depth: int = 0) -> list[dict]:  # noqa: ANN001
+    """Find the first record list without throwing away the original payload."""
+    if depth > 5:
+        return []
+    if isinstance(value, list):
+        records = [item for item in value if isinstance(item, dict)]
+        if records:
+            return records
+        for item in value:
+            found = _tripmatch_candidates(item, depth=depth + 1)
+            if found:
+                return found
+        return []
+    if not isinstance(value, dict):
+        return []
+    preferred_keys = (
+        "flights",
+        "flightList",
+        "transferPlans",
+        "transferInfos",
+        "schemes",
+        "plans",
+        "candidates",
+        "results",
+        "items",
+        "data",
+        "result",
+    )
+    for key in preferred_keys:
+        if key in value:
+            found = _tripmatch_candidates(value[key], depth=depth + 1)
+            if found:
+                return found
+    for child in value.values():
+        found = _tripmatch_candidates(child, depth=depth + 1)
+        if found:
+            return found
+    return []
+
+
+def _tripmatch_result(  # noqa: ANN001
+    tool_name: str,
+    query: dict,
+    outcome,
+    *,
+    provider: str = variflight_tripmatch_provider.PROVIDER,
+    api_key_env: str = "VARIFLIGHT_API_KEY",
+) -> dict:
+    result = {
+        "tool": tool_name,
+        "status": outcome.status,
+        "provider": provider,
+        "query": query,
+        "provider_payload": outcome.provider_payload,
+        "provider_raw_text": outcome.raw_text,
+        "provider_parsed_content": outcome.content,
+    }
+    candidates = _tripmatch_candidates(outcome.provider_payload)
+    if candidates:
+        # Each independently selectable flight/transfer can receive its own
+        # fact_id while the original provider payload remains lossless.
+        result["candidates"] = candidates
+    if outcome.error_code:
+        result["error_code"] = outcome.error_code
+    if outcome.error_message:
+        result["error_message"] = outcome.error_message
+    if outcome.status == "provider_not_connected":
+        result["note"] = (
+            "飞友 MCP 尚未配置可用 API Key，当前未执行真实查询；"
+            f"填写 {api_key_env} 后生效"
+        )
+    elif outcome.status != "ok":
+        result["note"] = "航班数据暂不可用，请以航司或机场官方渠道复核"
+    return result
+
+
+def _exec_flight_itineraries(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+    started = time.monotonic()
+    outcome = variflight_aviation_provider.search_flight_itineraries_sync(
+        args.dep_city_code, args.dep_date, args.arr_city_code
+    )
+    latency = int((time.monotonic() - started) * 1000)
+    query = {
+        "depCityCode": args.dep_city_code,
+        "depDate": args.dep_date,
+        "arrCityCode": args.arr_city_code,
+    }
+    _persist_log(
+        user_id,
+        request_id,
+        task_type,
+        tool_name=tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
+        provider=variflight_aviation_provider.PROVIDER,
+        status=outcome.status,
+        degraded_to_b=False,
+        latency_ms=latency,
+        input_summary={
+            **query,
+            "endpoint": variflight_aviation_provider.endpoint_identity(),
+            "api_key_present": variflight_aviation_provider.is_configured(),
+        },
+        output_summary=_tripmatch_output_summary(outcome),
+        error_code=outcome.error_code,
+    )
+    result = _tripmatch_result(
+        tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
+        query,
+        outcome,
+        provider=variflight_aviation_provider.PROVIDER,
+    )
+    result["verification"] = (
+        "指定日期方案与价格均为查询时参考，出票前须在航司或正规售票平台复核"
+    )
+    return result
+
+
+def _exec_flight_transfer(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+    started = time.monotonic()
+    outcome = variflight_aviation_provider.search_flight_transfer_sync(
+        args.depcity, args.arrcity, args.depdate
+    )
+    latency = int((time.monotonic() - started) * 1000)
+    query = {
+        "depcity": args.depcity,
+        "arrcity": args.arrcity,
+        "depdate": args.depdate,
+    }
+    _persist_log(
+        user_id,
+        request_id,
+        task_type,
+        tool_name=tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
+        provider=variflight_aviation_provider.PROVIDER,
+        status=outcome.status,
+        degraded_to_b=False,
+        latency_ms=latency,
+        input_summary={
+            **query,
+            "endpoint": variflight_aviation_provider.endpoint_identity(),
+            "api_key_present": variflight_aviation_provider.is_configured(),
+        },
+        output_summary=_tripmatch_output_summary(outcome),
+        error_code=outcome.error_code,
+    )
+    result = _tripmatch_result(
+        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
+        query,
+        outcome,
+        provider=variflight_aviation_provider.PROVIDER,
+        api_key_env="VARIFLIGHT_API_KEY",
+    )
+    result["query_horizon"] = (
+        "上游文档限定为从查询时点起至多未来 48 小时；超出窗口不得表述为已查询到"
+    )
+    result["transfer_type"] = "flight_to_flight"
+    return result
+
+
+def _exec_flight_train_transfer(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+    started = time.monotonic()
+    outcome = variflight_tripmatch_provider.search_flight_train_transfer_sync(
+        args.depcity, args.arrcity, args.depdate
+    )
+    latency = int((time.monotonic() - started) * 1000)
+    query = {
+        "depcity": args.depcity,
+        "arrcity": args.arrcity,
+        "depdate": args.depdate,
+    }
+    _persist_log(
+        user_id,
+        request_id,
+        task_type,
+        tool_name=tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+        provider=variflight_tripmatch_provider.PROVIDER,
+        status=outcome.status,
+        degraded_to_b=False,
+        latency_ms=latency,
+        input_summary={
+            **query,
+            "endpoint": variflight_tripmatch_provider.endpoint_identity(),
+            "api_key_present": variflight_tripmatch_provider.is_configured(),
+        },
+        output_summary=_tripmatch_output_summary(outcome),
+        error_code=outcome.error_code,
+    )
+    result = _tripmatch_result(
+        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER, query, outcome
+    )
+    result["rail_verification"] = {
+        "required": True,
+        "tool": tool_specs.TOOL_QUERY_RAIL,
+        "instruction": (
+            "Tripmatch 仅用于发现空铁中转候选；对每个入选铁路段，必须按实际起终点和日期"
+            "另行调用 query_rail_tickets，由现有 12306 MCP 查询车次、时刻、票价和余票参考。"
+        ),
+    }
+    return result
 
 
 def _guide_dict(guide: BookingEvidence) -> dict:

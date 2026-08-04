@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TripInfo(BaseModel):
@@ -54,6 +54,22 @@ class Schedule(BaseModel):
     fact_status: Literal["verified", "reference", "unverified"] | None = None
     fact_refs: list[str] = Field(default_factory=list)
     action: ScheduleAction | None = None
+
+    @field_validator("transport_mode", mode="before")
+    @classmethod
+    def normalize_long_distance_transport_mode(cls, value: object) -> object:
+        """Keep long-distance mode in `transport`; it is not an AMap route mode."""
+        if isinstance(value, str) and value.strip().lower() in {
+            "rail",
+            "train",
+            "high_speed_rail",
+            "flight",
+            "air",
+            "rail/air",
+            "rail/flight",
+        }:
+            return None
+        return value
 
 
 class DailyItinerary(BaseModel):

@@ -71,25 +71,11 @@ def build_checklist(brief: PlanningBrief) -> list[PlanningChecklistItem]:
             assumed=brief.traveler_count is None,
         ),
         _item(
-            "transport",
-            "大交通偏好",
-            brief.transport_preference or "未限定，由 AI 比较后推荐",
-            required=False,
-            assumed=brief.transport_preference is None,
-        ),
-        _item(
             "lodging",
             "住宿偏好",
             brief.lodging_preference or "未限定，优先位置与动线",
             required=False,
             assumed=brief.lodging_preference is None,
-        ),
-        _item(
-            "budget",
-            "预算范围",
-            brief.budget or "未限定，按舒适实用方案考虑",
-            required=False,
-            assumed=brief.budget is None,
         ),
         _item(
             "interests",

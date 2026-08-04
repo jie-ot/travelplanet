@@ -164,7 +164,7 @@ export function PlanningConversation({
                     </span>
                   </div>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    有任何不准确，直接继续告诉我；确认后才会开始查询和生成。
+                    有任何不准确，直接继续告诉我；确认前可按需查询，确认后才会生成行程。
                   </p>
                 </div>
               </header>

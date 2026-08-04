@@ -89,6 +89,23 @@ class Settings(BaseSettings):
     RAIL_MCP_ENABLED: bool = True
     RAIL_MCP_ENDPOINT: str = "stdio:npx -y 12306-mcp"
 
+    # —— A′ 类：飞友 Tripmatch MCP（航班与空铁中转候选）——
+    # Tripmatch 官方文档给出的服务路径大小写有误；实际可达路径为 lowercase。
+    VARIFLIGHT_TRIPMATCH_MCP_ENABLED: bool = True
+    VARIFLIGHT_TRIPMATCH_MCP_URL: str = (
+        "https://ai.variflight.com/servers/tripmatch/mcp/"
+    )
+    # Tripmatch 与 Aviation 共用；仅在运行时 URL query 中传给上游，禁止记录。
+    VARIFLIGHT_API_KEY: str = ""
+    VARIFLIGHT_TRIPMATCH_TIMEOUT_SECONDS: int = 30
+
+    # —— A′ 类：飞友 Aviation MCP（纯航班中转）——
+    VARIFLIGHT_AVIATION_MCP_ENABLED: bool = True
+    VARIFLIGHT_AVIATION_MCP_URL: str = (
+        "https://ai.variflight.com/servers/aviation/mcp/"
+    )
+    VARIFLIGHT_AVIATION_TIMEOUT_SECONDS: int = 30
+
     # —— 工具通用超时/重试 ——
     TOOL_TIMEOUT_SECONDS: int = 20
     TOOL_MAX_RETRY: int = 1

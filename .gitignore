@@ -70,6 +70,15 @@ htmlcov/
 /后端/logs/
 /后端/tmp/
 
+# Backend local-only dirs (keep scripts/seed_demo.py tracked)
+/后端/tests/
+/后端/deploy/
+/后端/e2e_result/
+/后端/e2e_results/
+/后端/scripts/*
+!/后端/scripts/seed_demo.py
+
+
 # Packaging artifacts and local delivery bundles
 *.apk
 *.aab

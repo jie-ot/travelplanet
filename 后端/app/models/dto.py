@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from app.ai.model_selection import DEFAULT_PLANNING_MODEL, PlanningModel
@@ -216,6 +216,19 @@ class PlanningBrief(CamelModel):
     constraints: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     summary: str = ""
+
+    @field_validator(
+        "destinations", "interests", "constraints", "assumptions", mode="before"
+    )
+    @classmethod
+    def normalize_nullable_lists(cls, value):  # noqa: ANN001, ANN206
+        """Model-facing compatibility: JSON null means no accumulated items."""
+        return [] if value is None else value
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def normalize_nullable_summary(cls, value):  # noqa: ANN001, ANN206
+        return "" if value is None else value
 
 
 class PlanningChecklistItem(CamelModel):

@@ -174,6 +174,8 @@ def chat_messages(
     timeout_seconds: int | None = None,
     max_attempts: int | None = None,
     planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
+    response_format: dict[str, str] | None = None,
+    thinking_enabled: bool | None = None,
 ) -> ChatTurn:
     """Run ONE real model round over a caller-managed `messages` list.
 
@@ -194,10 +196,7 @@ def chat_messages(
 
     runtime = _resolve_runtime(planning_model)
     client = _get_client(runtime)
-    attempts = max(
-        1,
-        max_attempts if max_attempts is not None else settings.VIVO_MAX_RETRY + 1,
-    )
+    attempts = _chat_attempt_count(runtime, max_attempts)
     last_transient: Exception | None = None
     timeout = _text_timeout_seconds(task=TASK_PLANNING, override=timeout_seconds)
 
@@ -205,6 +204,8 @@ def chat_messages(
     if tools:
         extra["tools"] = tools
         extra["tool_choice"] = "auto"
+    if response_format:
+        extra["response_format"] = response_format
     call_details = _chat_call_details(
         stage=stage,
         messages=messages,
@@ -214,11 +215,22 @@ def chat_messages(
         timeout_seconds=timeout,
         attempts=attempts,
         runtime=runtime,
+        response_format=response_format,
+        thinking_enabled=thinking_enabled,
     )
 
     for attempt in range(attempts):
         request_id = str(uuid.uuid4())
         started = time.monotonic()
+        log_event(
+            "model_chat_request",
+            status="sent",
+            request_id=request_id,
+            attempt=attempt + 1,
+            messages=_loggable_payload(messages),
+            tools=_loggable_payload(tools or []),
+            **call_details,
+        )
         try:
             request_kwargs = _completion_request_kwargs(
                 runtime=runtime,
@@ -228,6 +240,7 @@ def chat_messages(
                 timeout=timeout,
                 request_id=request_id,
                 extra=extra,
+                thinking_enabled=thinking_enabled,
             )
             resp = client.chat.completions.create(**request_kwargs)
         except (AuthenticationError, PermissionDeniedError) as exc:
@@ -300,6 +313,31 @@ def chat_messages(
         logger.info(
             "model chat ok (fc) request_id=%s latency_ms=%d tool_calls=%d",
             request_id, latency_ms, len(tool_calls),
+        )
+        log_event(
+            "model_chat_response",
+            status="success",
+            request_id=request_id,
+            latency_ms=latency_ms,
+            content=message.content,
+            tool_calls=[
+                {
+                    "id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                }
+                for call in tool_calls
+            ],
+            finish_reason=getattr(resp.choices[0], "finish_reason", None),
+            response_id=getattr(resp, "id", None),
+            reasoning_content_chars=len(
+                getattr(message, "reasoning_content", None) or ""
+            ),
+            reasoning_content_present=bool(
+                getattr(message, "reasoning_content", None)
+            ),
+            **call_details,
+            **_usage_details(resp),
         )
         log_event(
             "model_chat",
@@ -406,6 +444,15 @@ def _real_chat_json(
     while attempt < attempts:
         request_id = str(uuid.uuid4())
         started = time.monotonic()
+        log_event(
+            "model_chat_json_request",
+            status="sent",
+            task=task,
+            request_id=request_id,
+            attempt=attempt + 1,
+            messages=_loggable_payload(messages),
+            **call_details,
+        )
         try:
             request_kwargs = _completion_request_kwargs(
                 runtime=runtime,
@@ -486,6 +533,24 @@ def _real_chat_json(
             task, request_id, latency_ms,
         )
         log_event(
+            "model_chat_json_response",
+            status="success",
+            task=task,
+            request_id=request_id,
+            latency_ms=latency_ms,
+            content=content,
+            finish_reason=(
+                getattr(resp.choices[0], "finish_reason", None)
+                if getattr(resp, "choices", None)
+                else None
+            ),
+            response_id=getattr(resp, "id", None),
+            reasoning_content_chars=_response_reasoning_chars(resp),
+            reasoning_content_present=_response_reasoning_chars(resp) > 0,
+            **call_details,
+            **_usage_details(resp),
+        )
+        log_event(
             "model_chat_json",
             status="success",
             task=task,
@@ -555,6 +620,8 @@ def _chat_call_details(
     timeout_seconds: int,
     attempts: int,
     runtime: ChatRuntime,
+    response_format: dict[str, str] | None = None,
+    thinking_enabled: bool | None = None,
 ) -> dict[str, Any]:
     role_counts: dict[str, int] = {}
     content_chars = 0
@@ -573,7 +640,7 @@ def _chat_call_details(
             tool_names.append(str(function["name"]))
     return {
         "stage": stage,
-        **_runtime_log_details(runtime),
+        **_runtime_log_details(runtime, thinking_enabled=thinking_enabled),
         "message_count": len(messages),
         "message_role_counts": role_counts,
         "message_content_chars": content_chars,
@@ -583,17 +650,31 @@ def _chat_call_details(
         "max_completion_tokens": max_completion_tokens,
         "timeout_seconds": timeout_seconds,
         "max_attempts": attempts,
+        "response_format": response_format,
     }
 
 
-def _runtime_log_details(runtime: ChatRuntime) -> dict[str, Any]:
+def _chat_attempt_count(
+    runtime: ChatRuntime,
+    override: int | None,
+) -> int:
+    if override is not None:
+        return max(1, override)
+    configured = max(1, settings.VIVO_MAX_RETRY + 1)
+    return max(3, configured) if runtime.provider == "deepseek" else configured
+
+
+def _runtime_log_details(
+    runtime: ChatRuntime, *, thinking_enabled: bool | None = None
+) -> dict[str, Any]:
+    effective_thinking = True if thinking_enabled is None else thinking_enabled
     return {
         "planning_model": runtime.planning_model,
         "provider": runtime.provider,
         "model": runtime.api_model,
         "base_url_host": runtime.base_url.split("//", 1)[-1].split("/", 1)[0],
-        "thinking_enabled": True,
-        "reasoning_effort": runtime.reasoning_effort,
+        "thinking_enabled": effective_thinking,
+        "reasoning_effort": runtime.reasoning_effort if effective_thinking else None,
         "token_parameter": runtime.token_parameter,
         "temperature_sent": runtime.uses_temperature,
     }
@@ -608,23 +689,70 @@ def _completion_request_kwargs(
     timeout: int,
     request_id: str,
     extra: dict[str, Any] | None = None,
+    thinking_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Build provider-specific OpenAI SDK kwargs without leaking credentials."""
+    effective_thinking = True if thinking_enabled is None else thinking_enabled
+    extra_body = dict(runtime.extra_body)
+    if runtime.provider == "deepseek":
+        extra_body["thinking"] = {
+            "type": "enabled" if effective_thinking else "disabled"
+        }
     kwargs: dict[str, Any] = {
         "model": runtime.api_model,
         "messages": messages,
         "stream": False,
-        "reasoning_effort": runtime.reasoning_effort,
-        "extra_body": runtime.extra_body,
+        "extra_body": extra_body,
         "timeout": timeout,
         **(extra or {}),
     }
+    if effective_thinking:
+        kwargs["reasoning_effort"] = runtime.reasoning_effort
     kwargs[runtime.token_parameter] = max_completion_tokens
     if runtime.uses_temperature:
         kwargs["temperature"] = temperature
     if runtime.uses_vivo_request_query:
         kwargs["extra_query"] = {"request_id": request_id}
     return kwargs
+
+
+def _loggable_payload(value: Any) -> Any:
+    """Keep model trace payloads complete while excluding secrets and image blobs."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).lower().replace("-", "_")
+            if normalized_key == "reasoning_content":
+                result[str(key)] = (
+                    f"<redacted-private-reasoning chars={len(item)}>"
+                    if isinstance(item, str)
+                    else "<redacted-private-reasoning>"
+                )
+                continue
+            if normalized_key in {
+                "api_key",
+                "app_key",
+                "authorization",
+                "access_token",
+                "refresh_token",
+            }:
+                result[str(key)] = "<redacted>"
+                continue
+            if (
+                normalized_key == "url"
+                and isinstance(item, str)
+                and item.startswith("data:")
+            ):
+                media_type = item[5:].split(";", 1)[0] or "application/octet-stream"
+                result[str(key)] = (
+                    f"<redacted-data-url media_type={media_type} chars={len(item)}>"
+                )
+                continue
+            result[str(key)] = _loggable_payload(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_loggable_payload(item) for item in value]
+    return value
 
 
 def _response_reasoning_chars(response: Any) -> int:
