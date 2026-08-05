@@ -67,6 +67,8 @@ htmlcov/
 *.sqlite3
 /后端/static/uploads/
 /后端/static/generated/
+/后端/static/images/*
+!/后端/static/images/default_cover.jpg
 /后端/logs/
 /后端/tmp/
 

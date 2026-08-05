@@ -207,6 +207,31 @@ export interface DailyItinerary {
   date: string
   title?: string
   schedules: Schedule[]
+  daily_maps?: DailyMap[]
+}
+
+export interface DailyMapPoint {
+  schedule_id: string
+  marker: string
+  name: string
+  location: string
+  kind: "hotel" | "attraction"
+}
+
+export interface DailyMapLeg {
+  origin_marker: string
+  destination_marker: string
+  transport_text: string
+}
+
+export interface DailyMap {
+  id: string
+  title: string
+  image_url?: string | null
+  status: "ready" | "unavailable"
+  points: DailyMapPoint[]
+  legs: DailyMapLeg[]
+  line_note: string
 }
 
 export interface Schedule {
@@ -231,6 +256,9 @@ export interface Schedule {
     type: "map" | "booking" | "details" | "alternative" | "complete"
     label: string
   } | null
+  map_role?: "hotel" | "attraction" | null
+  map_group?: string | null
+  map_label?: string | null
 }
 
 /* ---------------- 业务状态码（前端展示用，对齐 0.6） ---------------- */

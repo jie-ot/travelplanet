@@ -27,6 +27,7 @@ from app.models.dto import (
 )
 from app.models.itinerary import ItineraryData
 from app.services import (
+    daily_map_service,
     id_service,
     itinerary_id_service,
     itinerary_validation_service,
@@ -223,6 +224,10 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             except InvalidParamError as exc:
                 # For #6, business-rule failure maps to AI failure (1001).
                 raise AIGenerationError(f"行程规划校验失败：{exc.message}") from exc
+            aligned = daily_map_service.enrich_daily_maps(
+                aligned,
+                request.planning_model,
+            )
         log_event(
             "planning_result",
             status="success",

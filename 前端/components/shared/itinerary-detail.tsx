@@ -1,9 +1,10 @@
 "use client"
 
-import { useState, type CSSProperties } from "react"
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react"
 import {
   CalendarDays,
   ChevronDown,
+  Download,
   Footprints,
   Luggage,
   Map as MapIcon,
@@ -12,8 +13,13 @@ import {
   Route,
   Ticket,
   Utensils,
+  X,
 } from "lucide-react"
-import type { ItineraryData, Schedule } from "@/types"
+import { ConfirmDialog } from "@/components/shared/confirm-dialog"
+import { useApp } from "@/components/shared/app-context"
+import { resolveAssetUrl } from "@/lib/asset"
+import { saveTravelImage } from "@/lib/postcard-save"
+import type { DailyMap, ItineraryData, Schedule } from "@/types"
 
 const PERIOD_ICONS: Record<string, string> = {
   上午: "☀",
@@ -31,11 +37,18 @@ function destinationMood(destination: string) {
 }
 
 export function ItineraryDetail({ data }: { data: ItineraryData }) {
+  const { registerBackHandler, toast } = useApp()
   const { trip_info, preparations, bookings, food_recommendations, itinerary } = data
   const [activeDay, setActiveDay] = useState(itinerary[0]?.id ?? "")
   const [expandedSchedules, setExpandedSchedules] = useState<Set<string>>(() => new Set())
   const [bookingOpen, setBookingOpen] = useState(false)
   const [foodOpen, setFoodOpen] = useState(false)
+  const [openMapDays, setOpenMapDays] = useState<Set<string>>(
+    () => new Set(itinerary[0]?.daily_maps?.length ? [itinerary[0].id] : []),
+  )
+  const [previewMap, setPreviewMap] = useState<{ map: DailyMap; date: string } | null>(null)
+  const [pendingSave, setPendingSave] = useState<{ map: DailyMap; date: string } | null>(null)
+  const [savingMap, setSavingMap] = useState(false)
   const mood = destinationMood(trip_info.destination)
   const activeDayIndex = Math.max(
     0,
@@ -52,8 +65,35 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
     })
   }
 
+  function toggleDayMap(dayId: string) {
+    setOpenMapDays((current) => {
+      const next = new Set(current)
+      if (next.has(dayId)) next.delete(dayId)
+      else next.add(dayId)
+      return next
+    })
+  }
+
+  function savePendingMap() {
+    if (!pendingSave?.map.image_url) return
+    setSavingMap(true)
+    const imageUrl = resolveAssetUrl(pendingSave.map.image_url)
+    void saveTravelImage(
+      imageUrl,
+      `${pendingSave.date}-${pendingSave.map.title}-游玩地图`,
+      "每日游玩地图",
+    )
+      .then(() => {
+        setPendingSave(null)
+        toast("地图已保存", "success")
+      })
+      .catch(() => toast("地图保存失败，请稍后重试", "error"))
+      .finally(() => setSavingMap(false))
+  }
+
   return (
-    <article className={`itinerary-experience itinerary-mood-${mood}`}>
+    <>
+      <article className={`itinerary-experience itinerary-mood-${mood}`}>
       <header className="itinerary-hero">
         <div className="itinerary-hero-light" aria-hidden />
         <div className="itinerary-hero-depth" aria-hidden />
@@ -174,10 +214,283 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
                 />
               ))}
             </ol>
+
+            {selectedDay.daily_maps?.length ? (
+              <DailyMapCard
+                maps={selectedDay.daily_maps}
+                date={selectedDay.date}
+                open={openMapDays.has(selectedDay.id)}
+                onToggle={() => toggleDayMap(selectedDay.id)}
+                onPreview={(map) => setPreviewMap({ map, date: selectedDay.date })}
+                onRequestSave={(map) => setPendingSave({ map, date: selectedDay.date })}
+              />
+            ) : null}
           </section>
         ) : null}
       </div>
-    </article>
+      </article>
+      <MapLightbox
+        selection={previewMap}
+        onClose={() => setPreviewMap(null)}
+        onRequestSave={(selection) => setPendingSave(selection)}
+        registerBackHandler={registerBackHandler}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingSave)}
+        title="保存这张游玩地图？"
+        description="地图将保存到手机系统相册；网页端会下载原图。"
+        icon={<Download className="size-7 text-primary" aria-hidden />}
+        onClose={() => {
+          if (!savingMap) setPendingSave(null)
+        }}
+        actions={[
+          {
+            label: savingMap ? "正在保存…" : "保存图片",
+            onClick: savePendingMap,
+          },
+          {
+            label: "取消",
+            variant: "ghost",
+            onClick: () => setPendingSave(null),
+          },
+        ]}
+      />
+    </>
+  )
+}
+
+const LONG_PRESS_MS = 650
+const LONG_PRESS_MOVE_TOLERANCE = 12
+
+function DailyMapCard({
+  maps,
+  date,
+  open,
+  onToggle,
+  onPreview,
+  onRequestSave,
+}: {
+  maps: DailyMap[]
+  date: string
+  open: boolean
+  onToggle: () => void
+  onPreview: (map: DailyMap) => void
+  onRequestSave: (map: DailyMap) => void
+}) {
+  const [activeIndex, setActiveIndex] = useState(0)
+  const activeMap = maps[Math.min(activeIndex, maps.length - 1)]
+  const pointCount = maps.reduce((total, map) => total + map.points.length, 0)
+
+  return (
+    <section className={`daily-map-card ${open ? "is-open" : ""}`}>
+      <button
+        type="button"
+        className="daily-map-toggle"
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span className="daily-map-toggle-icon"><MapIcon className="size-4" aria-hidden /></span>
+        <span>
+          <strong>当日游玩地图</strong>
+          <small>{maps.length > 1 ? `${maps.length} 个游玩区域 · ` : ""}{pointCount} 个地点</small>
+        </span>
+        <ChevronDown className={open ? "is-open size-4" : "size-4"} aria-hidden />
+      </button>
+
+      {open ? (
+        <div className="daily-map-content">
+          {maps.length > 1 ? (
+            <div className="daily-map-tabs" role="tablist" aria-label="切换当日游玩区域">
+              {maps.map((map, index) => (
+                <button
+                  key={map.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeIndex === index}
+                  className={activeIndex === index ? "is-active" : ""}
+                  onClick={() => setActiveIndex(index)}
+                >
+                  {map.title}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="daily-map-area">{activeMap.title}</p>
+          )}
+          <DailyMapPanel
+            map={activeMap}
+            onPreview={() => onPreview(activeMap)}
+            onRequestSave={() => onRequestSave(activeMap)}
+          />
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function DailyMapPanel({
+  map,
+  onPreview,
+  onRequestSave,
+}: {
+  map: DailyMap
+  onPreview: () => void
+  onRequestSave: () => void
+}) {
+  const [failedImageId, setFailedImageId] = useState<string | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pressStartRef = useRef<{ x: number; y: number } | null>(null)
+  const didLongPressRef = useRef(false)
+  const imageUrl = map.image_url ? resolveAssetUrl(map.image_url) : ""
+  const canShowImage = map.status === "ready" && Boolean(imageUrl) && failedImageId !== map.id
+
+  useEffect(
+    () => () => {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current)
+    },
+    [],
+  )
+
+  function cancelLongPress() {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current)
+    longPressTimerRef.current = null
+    pressStartRef.current = null
+  }
+
+  function startLongPress(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) return
+    cancelLongPress()
+    didLongPressRef.current = false
+    pressStartRef.current = { x: event.clientX, y: event.clientY }
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null
+      pressStartRef.current = null
+      didLongPressRef.current = true
+      if ("vibrate" in navigator) navigator.vibrate(30)
+      onRequestSave()
+    }, LONG_PRESS_MS)
+  }
+
+  function moveLongPress(event: ReactPointerEvent<HTMLButtonElement>) {
+    const start = pressStartRef.current
+    if (!start) return
+    if (
+      Math.abs(event.clientX - start.x) > LONG_PRESS_MOVE_TOLERANCE ||
+      Math.abs(event.clientY - start.y) > LONG_PRESS_MOVE_TOLERANCE
+    ) {
+      cancelLongPress()
+    }
+  }
+
+  return (
+    <div className="daily-map-panel">
+      {canShowImage ? (
+        <button
+          type="button"
+          className="daily-map-image-button"
+          aria-label={`放大查看${map.title}游玩地图`}
+          onClick={() => {
+            if (didLongPressRef.current) {
+              didLongPressRef.current = false
+              return
+            }
+            onPreview()
+          }}
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={startLongPress}
+          onPointerMove={moveLongPress}
+          onPointerUp={cancelLongPress}
+          onPointerCancel={cancelLongPress}
+          onPointerLeave={cancelLongPress}
+        >
+          {/* Direct image rendering preserves the original cached map for zoom and save. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={imageUrl}
+            alt={`${map.title}当天酒店与景点相对位置图`}
+            draggable={false}
+            onError={() => setFailedImageId(map.id)}
+          />
+          <span>点击放大</span>
+        </button>
+      ) : (
+        <div className="daily-map-fallback" role="img" aria-label="地图图片暂时不可用">
+          <MapIcon className="size-5" aria-hidden />
+          <span>地图暂时不可用</span>
+        </div>
+      )}
+
+      <div className="daily-map-legend" aria-label="地图地点图例">
+        {map.points.map((point) => (
+          <span key={`${point.schedule_id}-${point.marker}`}>
+            <b className={point.kind === "hotel" ? "is-hotel" : ""}>{point.marker}</b>
+            {point.name}
+          </span>
+        ))}
+      </div>
+
+      {map.legs.length ? (
+        <div className="daily-map-transport" aria-label="地点间交通方式">
+          {map.legs.map((leg) => (
+            <span key={`${leg.origin_marker}-${leg.destination_marker}`}>
+              <b>{leg.origin_marker}</b>
+              <i aria-hidden>→</i>
+              {leg.transport_text}
+              <i aria-hidden>→</i>
+              <b>{leg.destination_marker}</b>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <p className="daily-map-note">{map.line_note}{canShowImage ? " · 长按保存" : ""}</p>
+    </div>
+  )
+}
+
+function MapLightbox({
+  selection,
+  onClose,
+  onRequestSave,
+  registerBackHandler,
+}: {
+  selection: { map: DailyMap; date: string } | null
+  onClose: () => void
+  onRequestSave: (selection: { map: DailyMap; date: string }) => void
+  registerBackHandler: (handler: () => void) => () => void
+}) {
+  useEffect(() => {
+    if (!selection) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose()
+    }
+    document.addEventListener("keydown", onKeyDown)
+    const unregister = registerBackHandler(onClose)
+    return () => {
+      document.removeEventListener("keydown", onKeyDown)
+      unregister()
+    }
+  }, [onClose, registerBackHandler, selection])
+
+  if (!selection?.map.image_url) return null
+  const imageUrl = resolveAssetUrl(selection.map.image_url)
+  return (
+    <div className="daily-map-lightbox" role="presentation" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={`${selection.map.title}游玩地图大图`} onClick={(event) => event.stopPropagation()}>
+        <div className="daily-map-lightbox-bar">
+          <p><strong>{selection.map.title}</strong><span>{selection.date}</span></p>
+          <span>
+            <button type="button" onClick={() => onRequestSave(selection)} aria-label="保存地图">
+              <Download className="size-4" aria-hidden />
+            </button>
+            <button type="button" onClick={onClose} aria-label="关闭大图">
+              <X className="size-5" aria-hidden />
+            </button>
+          </span>
+        </div>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={imageUrl} alt={`${selection.map.title}当天酒店与景点相对位置大图`} draggable={false} />
+      </div>
+    </div>
   )
 }
 

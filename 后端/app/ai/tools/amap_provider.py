@@ -12,7 +12,7 @@ future MCP transport switch; the upper layer is agnostic either way.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass
 import logging
 import re
@@ -44,6 +44,7 @@ _POI_DETAIL_PATH = "/v5/place/detail"
 _GEOCODE_PATH = "/v3/geocode/geo"
 _REGEOCODE_PATH = "/v3/geocode/regeo"
 _DISTRICT_PATH = "/v3/config/district"
+_STATIC_MAP_PATH = "/v3/staticmap"
 
 _ROUTE_PATHS = {
     "driving": _DRIVING_PATH,
@@ -51,8 +52,7 @@ _ROUTE_PATHS = {
     "bicycling": _BICYCLING_PATH,
     "transit": _TRANSIT_PATH,
 }
-_AMAP_QPS_WINDOW_SECONDS = 1.0
-_AMAP_REQUEST_TIMES: dict[str, deque[float]] = defaultdict(deque)
+_AMAP_NEXT_REQUEST_AT: dict[str, float] = defaultdict(float)
 _AMAP_RATE_LOCK = threading.Lock()
 _CITY_HINTS = [
     "北京",
@@ -156,26 +156,60 @@ def _get(path: str, params: dict) -> dict | None:
     return None
 
 
+def static_map_image(params: dict[str, str | int]) -> bytes | None:
+    """Return a rendered static-map image, or ``None`` on a provider failure."""
+    if not is_available():
+        return None
+    url = f"{settings.AMAP_BASE_URL}{_STATIC_MAP_PATH}"
+    query = {**params, "key": settings.AMAP_API_KEY}
+    attempts = max(1, settings.TOOL_MAX_RETRY + 1)
+    for attempt in range(attempts):
+        try:
+            _throttle_amap_qps(_STATIC_MAP_PATH)
+            with httpx.Client(timeout=settings.TOOL_TIMEOUT_SECONDS) as client:
+                resp = client.get(url, params=query)
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if resp.status_code == 200 and content_type.startswith("image/"):
+                return resp.content
+            logger.warning(
+                "amap %s invalid response http=%d content_type=%s",
+                _STATIC_MAP_PATH,
+                resp.status_code,
+                content_type,
+            )
+            retryable = resp.status_code == 429 or resp.status_code >= 500
+            if not retryable or attempt + 1 >= attempts:
+                return None
+            time.sleep(min(0.5, 0.2 * (attempt + 1)))
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+            logger.warning(
+                "amap %s transient error attempt %d: %s",
+                _STATIC_MAP_PATH,
+                attempt + 1,
+                type(exc).__name__,
+            )
+            if attempt + 1 < attempts:
+                time.sleep(min(0.5, 0.2 * (attempt + 1)))
+            continue
+        except Exception:  # noqa: BLE001
+            logger.exception("amap %s unexpected error", _STATIC_MAP_PATH)
+            return None
+    return None
+
+
 def _throttle_amap_qps(service_key: str) -> None:
     """Keep each AMap service within its screenshot-confirmed 3 QPS limit."""
     # The active console screenshot confirms 3 QPS for every service. The env
     # may lower this safety cap, but cannot raise it beyond the purchased tier.
     max_qps = min(3, max(1, int(getattr(settings, "AMAP_MAX_QPS", 3) or 3)))
+    min_interval = 1.0 / max_qps
     with _AMAP_RATE_LOCK:
-        request_times = _AMAP_REQUEST_TIMES[service_key]
-    while True:
         now = time.monotonic()
-        with _AMAP_RATE_LOCK:
-            while (
-                request_times
-                and now - request_times[0] >= _AMAP_QPS_WINDOW_SECONDS
-            ):
-                request_times.popleft()
-            if len(request_times) < max_qps:
-                request_times.append(now)
-                return
-            wait_seconds = _AMAP_QPS_WINDOW_SECONDS - (now - request_times[0])
-        time.sleep(max(0.01, wait_seconds))
+        scheduled_at = max(now, _AMAP_NEXT_REQUEST_AT[service_key])
+        _AMAP_NEXT_REQUEST_AT[service_key] = scheduled_at + min_interval
+    wait_seconds = scheduled_at - now
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
 
 
 def weather(city: str, date: str) -> WeatherFact:

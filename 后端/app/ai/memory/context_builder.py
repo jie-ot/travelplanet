@@ -26,9 +26,12 @@ def build_planning_user_text(
     parts.append(f"【用户长期旅行偏好摘要】\n{memory_summary}")
     parts.append(f"【累计用户需求（含本轮新增要求）】\n{message}")
     if context is not None:
+        compact_context = context.model_dump()
+        for day in compact_context.get("itinerary", []):
+            day.pop("daily_maps", None)
         parts.append(
             "【最新完整行程 context（只保留上一版规划；请在此基础上重写，未涉及部分保持不变）】\n"
-            + json.dumps(context.model_dump(), ensure_ascii=False)
+            + json.dumps(compact_context, ensure_ascii=False)
         )
     else:
         parts.append("【当前完整行程 context】\nnull（首轮，请新建完整行程）")

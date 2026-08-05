@@ -7,7 +7,15 @@ interface PostcardSaverPlugin {
 const PostcardSaver = registerPlugin<PostcardSaverPlugin>("PostcardSaver")
 
 export async function savePostcardImage(imageUrl: string, title: string): Promise<void> {
-  const fileName = `旅行星球-${sanitizeFileName(title)}`
+  return saveTravelImage(imageUrl, title, "旅行明信片")
+}
+
+export async function saveTravelImage(
+  imageUrl: string,
+  title: string,
+  fallbackName = "旅行图片",
+): Promise<void> {
+  const fileName = `旅行星球-${sanitizeFileName(title, fallbackName)}`
 
   if (Capacitor.isNativePlatform()) {
     if (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:")) {
@@ -51,9 +59,9 @@ async function blobUrlToDataUrl(blobUrl: string): Promise<string> {
   })
 }
 
-function sanitizeFileName(value: string): string {
+function sanitizeFileName(value: string, fallbackName: string): string {
   const normalized = value.trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ")
-  return (normalized || "旅行明信片").slice(0, 80)
+  return (normalized || fallbackName).slice(0, 80)
 }
 
 function extensionForMimeType(mimeType: string): string {

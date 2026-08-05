@@ -1279,6 +1279,297 @@
   justify-content: flex-start;
 }
 
+.daily-map-card {
+  margin-top: .7rem;
+  overflow: hidden;
+  border: 1px solid rgb(21 74 92 / .1);
+  border-radius: .95rem;
+  background: rgb(252 251 247 / .94);
+  box-shadow: 0 10px 24px -24px rgb(18 62 79 / .74);
+}
+
+.daily-map-toggle {
+  display: grid;
+  width: 100%;
+  min-height: 3.5rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: .62rem;
+  padding: .65rem .75rem;
+  color: #244d5c;
+  text-align: left;
+}
+
+.daily-map-toggle-icon {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  color: #147b96;
+  border-radius: .68rem;
+  background: #e5f0ef;
+}
+
+.daily-map-toggle > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.daily-map-toggle strong {
+  font-family: var(--font-rounded-family);
+  font-size: .875rem;
+  line-height: 1.35;
+}
+
+.daily-map-toggle small {
+  margin-top: .08rem;
+  color: #758993;
+  font-size: .71875rem;
+}
+
+.daily-map-toggle > svg {
+  color: #6b818c;
+  transition: transform .25s ease;
+}
+
+.daily-map-toggle > svg.is-open {
+  transform: rotate(180deg);
+}
+
+.daily-map-content {
+  padding: .15rem .68rem .7rem;
+  border-top: 1px solid rgb(21 74 92 / .07);
+  animation: materialize-in .25s both;
+}
+
+.daily-map-area {
+  margin: .52rem 0 .42rem;
+  color: #4d6873;
+  font-size: .75rem;
+  font-weight: 750;
+}
+
+.daily-map-tabs {
+  display: flex;
+  gap: .34rem;
+  overflow-x: auto;
+  padding: .48rem 0 .42rem;
+}
+
+.daily-map-tabs button {
+  flex: none;
+  padding: .3rem .58rem;
+  color: #607985;
+  font-size: .71875rem;
+  font-weight: 700;
+  border: 1px solid rgb(21 74 92 / .1);
+  border-radius: 999px;
+  background: #f4f4ef;
+}
+
+.daily-map-tabs button.is-active {
+  color: #155d73;
+  border-color: rgb(20 123 150 / .25);
+  background: #e4f0ef;
+}
+
+.daily-map-panel {
+  min-width: 0;
+}
+
+.daily-map-image-button,
+.daily-map-fallback {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: 5 / 3;
+  overflow: hidden;
+  place-items: center;
+  color: #627b86;
+  border: 1px solid rgb(21 74 92 / .1);
+  border-radius: .82rem;
+  background: #e9eeec;
+}
+
+.daily-map-image-button {
+  cursor: zoom-in;
+  touch-action: pan-y;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+.daily-map-image-button img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.daily-map-image-button > span {
+  position: absolute;
+  right: .45rem;
+  bottom: .42rem;
+  padding: .24rem .44rem;
+  color: white;
+  font-size: .65625rem;
+  font-weight: 700;
+  border-radius: 999px;
+  background: rgb(18 55 69 / .68);
+  backdrop-filter: blur(6px);
+}
+
+.daily-map-fallback {
+  align-content: center;
+  gap: .35rem;
+  font-size: .75rem;
+}
+
+.daily-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .34rem .65rem;
+  margin-top: .52rem;
+}
+
+.daily-map-legend > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: .3rem;
+  color: #4e6874;
+  font-size: .75rem;
+  line-height: 1.4;
+}
+
+.daily-map-legend b,
+.daily-map-transport b {
+  display: inline-grid;
+  width: 1.22rem;
+  height: 1.22rem;
+  flex: none;
+  place-items: center;
+  color: white;
+  font-size: .625rem;
+  border-radius: 50%;
+  background: #df6c51;
+}
+
+.daily-map-legend b.is-hotel {
+  background: #2d7fa3;
+}
+
+.daily-map-transport {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .32rem;
+  margin-top: .48rem;
+}
+
+.daily-map-transport > span {
+  display: inline-flex;
+  align-items: center;
+  gap: .22rem;
+  padding: .25rem .38rem;
+  color: #526d78;
+  font-size: .6875rem;
+  border-radius: .48rem;
+  background: #f0f2ee;
+}
+
+.daily-map-transport b {
+  width: 1.05rem;
+  height: 1.05rem;
+  font-size: .5625rem;
+  background: #607c88;
+}
+
+.daily-map-transport i {
+  color: #8b9da4;
+  font-style: normal;
+}
+
+.daily-map-note {
+  margin-top: .42rem;
+  color: #8a999f;
+  font-size: .65625rem;
+}
+
+.daily-map-lightbox {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: max(1rem, env(safe-area-inset-top)) .75rem max(1rem, env(safe-area-inset-bottom));
+  background: rgb(9 24 31 / .88);
+  backdrop-filter: blur(12px);
+  animation: materialize-in .2s both;
+}
+
+.daily-map-lightbox > div {
+  width: min(100%, 62.5rem);
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / .18);
+  border-radius: 1rem;
+  background: #142832;
+  box-shadow: 0 28px 80px -22px rgb(0 0 0 / .8);
+}
+
+.daily-map-lightbox-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .58rem .65rem;
+  color: white;
+}
+
+.daily-map-lightbox-bar p,
+.daily-map-lightbox-bar > span {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+
+.daily-map-lightbox-bar p {
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .05rem;
+}
+
+.daily-map-lightbox-bar strong {
+  max-width: 64vw;
+  overflow: hidden;
+  font-size: .8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.daily-map-lightbox-bar p span {
+  color: rgb(255 255 255 / .62);
+  font-size: .65625rem;
+}
+
+.daily-map-lightbox-bar button {
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
+  border-radius: .7rem;
+  background: rgb(255 255 255 / .1);
+}
+
+.daily-map-lightbox > div > img {
+  display: block;
+  width: 100%;
+  max-height: calc(100dvh - 7rem);
+  object-fit: contain;
+  background: #e8eeec;
+  user-select: none;
+}
+
 @keyframes persona-moment-change {
   from {
     opacity: 0;
@@ -1340,6 +1631,14 @@
   .itinerary-day-nav button {
     min-width: 3.7rem;
   }
+
+  .daily-map-content {
+    padding-inline: .55rem;
+  }
+
+  .daily-map-legend > span {
+    font-size: .71875rem;
+  }
 }
 
 @media (max-height: 760px) {
@@ -1385,7 +1684,9 @@
   .persona-moment,
   .itinerary-day,
   .itinerary-day-nav button.is-active::after,
-  .itinerary-stop.is-current .itinerary-node {
+  .itinerary-stop.is-current .itinerary-node,
+  .daily-map-content,
+  .daily-map-lightbox {
     animation: none !important;
   }
 }

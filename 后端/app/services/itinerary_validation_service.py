@@ -116,6 +116,7 @@ def validate_itinerary(data: ItineraryData) -> None:
 
         seen_sch_ids: set[str] = set()
         last_minutes: int | None = None
+        last_end_minutes: int | None = None
         for sch in day.schedules:
             if not sch.id.strip():
                 raise InvalidParamError("行程条目缺少稳定 ID")
@@ -132,4 +133,8 @@ def validate_itinerary(data: ItineraryData) -> None:
             if start_m is not None:
                 if last_minutes is not None and start_m < last_minutes:
                     raise InvalidParamError("同一天行程的时间顺序必须递增")
+                if last_end_minutes is not None and start_m < last_end_minutes:
+                    raise InvalidParamError("同一天行程的时间不得重叠")
                 last_minutes = start_m
+            if end_m is not None:
+                last_end_minutes = end_m

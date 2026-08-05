@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -57,6 +58,8 @@ logger = logging.getLogger("travelplanet")
 # non-blocking, but the model must always converge to a final JSON answer).
 _MAX_TOOL_ROUNDS = 8
 _TARGET_TOOL_ROUNDS = 5
+_DEEPSEEK_TARGET_TOOL_ROUNDS = 2
+_DEEPSEEK_MAX_TOOL_ROUNDS = 4
 _MAX_TOOL_CALLS_TOTAL = 75
 _MAX_INTAKE_TOOL_ROUNDS = 3
 _MAX_INTAKE_TOOL_CALLS_TOTAL = 8
@@ -1084,6 +1087,8 @@ def _load_planning_system_prompt(planning_model: PlanningModel) -> str:
         prompt += (
             "\n\n【DeepSeek 专属航班工具规则】\n"
             + load_prompt("planning_flight_tools_deepseek.md")
+            + "\n\n【DeepSeek 专属每日游玩地图标注】\n"
+            + load_prompt("planning_daily_map_deepseek.md")
         )
     return prompt
 
@@ -1139,17 +1144,22 @@ def _plan_with_tools(
     allowed_external_tool_names = tool_specs.external_tool_names_for_model(
         planning_model
     )
-    active_round_limit = _TARGET_TOOL_ROUNDS
+    deepseek_fast_path = planning_model in DEEPSEEK_PLANNING_MODELS
+    target_rounds = (
+        _DEEPSEEK_TARGET_TOOL_ROUNDS if deepseek_fast_path else _TARGET_TOOL_ROUNDS
+    )
+    max_rounds = _DEEPSEEK_MAX_TOOL_ROUNDS if deepseek_fast_path else _MAX_TOOL_ROUNDS
+    active_round_limit = target_rounds
     forced_close_reason = "target_rounds_complete"
 
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    for round_idx in range(max_rounds):
         if round_idx >= active_round_limit:
             break
         log_event(
             "planning_tool_round",
             round=round_idx + 1,
-            target_rounds=_TARGET_TOOL_ROUNDS,
-            max_rounds=_MAX_TOOL_ROUNDS,
+            target_rounds=target_rounds,
+            max_rounds=max_rounds,
             active_round_limit=active_round_limit,
             remaining_rounds_including_current=active_round_limit - round_idx,
             total_calls=external_calls,
@@ -1309,12 +1319,28 @@ def _plan_with_tools(
                             "message": "本轮仍有外部查询；请读取结果后下一轮再结束研究",
                         }
                     else:
-                        research_summary = finish.model_dump()
-                        result = {
-                            "tool": tc.name,
-                            "status": "ok",
-                            "toolsClosed": True,
-                        }
+                        finish_gaps = _critical_research_gaps(
+                            scope=scope,
+                            remaining_queries=remaining_queries,
+                            fact_registry=fact_registry,
+                        )
+                        if finish_gaps and round_idx + 1 < max_rounds:
+                            remaining_queries = list(
+                                dict.fromkeys([*remaining_queries, *finish_gaps])
+                            )
+                            result = {
+                                "tool": tc.name,
+                                "status": "error",
+                                "message": "关键事实仍缺失，请只补查后再结束研究",
+                                "criticalGaps": finish_gaps,
+                            }
+                        else:
+                            research_summary = finish.model_dump()
+                            result = {
+                                "tool": tc.name,
+                                "status": "ok",
+                                "toolsClosed": True,
+                            }
                 except ValidationError as exc:
                     result = {
                         "tool": tc.name,
@@ -1391,21 +1417,24 @@ def _plan_with_tools(
         if research_summary is not None:
             break
         completed_rounds = round_idx + 1
-        if completed_rounds == _TARGET_TOOL_ROUNDS:
+        if completed_rounds == target_rounds:
             critical_gaps = _critical_research_gaps(
                 scope=scope,
                 remaining_queries=remaining_queries,
                 fact_registry=fact_registry,
             )
-            if critical_gaps and external_calls < _MAX_TOOL_CALLS_TOTAL:
-                active_round_limit = _MAX_TOOL_ROUNDS
+            if (
+                critical_gaps
+                and external_calls < _MAX_TOOL_CALLS_TOTAL
+            ):
+                active_round_limit = max_rounds
                 forced_close_reason = "max_rounds_reached_with_critical_gaps"
                 log_event(
                     "planning_research_rounds_extended",
                     status="success",
                     completed_rounds=completed_rounds,
-                    previous_limit=_TARGET_TOOL_ROUNDS,
-                    extended_limit=_MAX_TOOL_ROUNDS,
+                    previous_limit=target_rounds,
+                    extended_limit=max_rounds,
                     critical_gaps=critical_gaps,
                     external_calls=external_calls,
                     planning_model=planning_model,
@@ -1414,8 +1443,8 @@ def _plan_with_tools(
                     {
                         "role": "user",
                         "content": (
-                            "默认 5 轮研究已完成，但以下关键事实仍缺失，因此允许延长到"
-                            f" {_MAX_TOOL_ROUNDS} 轮：{'; '.join(critical_gaps)}。"
+                            f"默认 {target_rounds} 轮研究已完成，但以下关键事实仍缺失，"
+                            f"因此允许延长到 {max_rounds} 轮：{'; '.join(critical_gaps)}。"
                             "请只补查这些关键缺口，完成后立即调用 finish_research。"
                         ),
                     }
@@ -1457,8 +1486,8 @@ def _plan_with_tools(
             "planning_research_forced_close",
             status="success",
             reason=forced_close_reason,
-            target_rounds=_TARGET_TOOL_ROUNDS,
-            max_rounds=_MAX_TOOL_ROUNDS,
+            target_rounds=target_rounds,
+            max_rounds=max_rounds,
             external_calls=external_calls,
             fact_registry_count=len(fact_registry),
             retained_fact_count=len(retained_facts),
@@ -1478,6 +1507,20 @@ def _plan_with_tools(
         stage="planning_final",
         planning_model=planning_model,
     )
+    final_data = _repair_time_window_violations(
+        system_prompt=system_prompt,
+        user_text=user_text,
+        itinerary=final_data,
+        planning_model=planning_model,
+    )
+    if planning_model in DEEPSEEK_PLANNING_MODELS:
+        log_event(
+            "planning_audit_skipped",
+            status="success",
+            reason="deepseek_fast_path_uses_deterministic_validation",
+            planning_model=planning_model,
+        )
+        return final_data
     audit = _audit_itinerary(
         user_text=user_text,
         scope=scope,
@@ -1487,18 +1530,6 @@ def _plan_with_tools(
     )
     if audit is None or audit.passed or not audit.missing_queries:
         return final_data
-    if planning_model in DEEPSEEK_PLANNING_MODELS:
-        log_event(
-            "planning_audit_advisory_only",
-            status="success",
-            reason="keep_first_valid_itinerary",
-            problem_count=len(audit.problems),
-            problems=audit.problems,
-            skipped_query_count=len(audit.missing_queries),
-            planning_model=planning_model,
-        )
-        return final_data
-
     added_facts = False
     remaining_budget = max(0, _MAX_TOOL_CALLS_TOTAL - external_calls)
     audit_query_limit = 4 if planning_model in DEEPSEEK_PLANNING_MODELS else 8
@@ -1955,7 +1986,7 @@ def _critical_research_gaps(
     destination_count = len(destinations) if isinstance(destinations, list) else 0
     if scope.get("needsTransport") and not transport_query_keys:
         gaps.append("去返程或跨城大交通事实缺失")
-    elif destination_count > 1 and len(transport_query_keys) < destination_count:
+    elif len(transport_query_keys) < destination_count + 1:
         gaps.append("多城转场交通覆盖不足")
 
     if scope.get("needsHotel"):
@@ -2188,6 +2219,177 @@ def _compact_planning_fact_value(value: Any, *, field_name: str = "") -> Any:
     return value
 
 
+_TIME_WINDOW_BOUNDS = {
+    "早上": ("06:00", "11:59"),
+    "上午": ("06:00", "11:59"),
+    "傍晚": ("17:00", "19:30"),
+    "晚上": ("18:00", "23:59"),
+}
+_TIME_WINDOW_PATTERN = re.compile(
+    r"(?P<month>\d{1,2})月(?P<day>\d{1,2})日"
+    r"(?P<period>早上|上午|傍晚|晚上)(?P<clause>[^，。；\n]{0,80})"
+)
+_DESTINATION_PATTERN = re.compile(
+    r"(?:去|前往|返回)(?P<destination>[\u4e00-\u9fff]{2,8}?)(?=[，、。；\s]|$)"
+)
+_CLOCK_PATTERN = re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d")
+_INTERCITY_MARKERS = ("航班", "飞机", "高铁", "动车", "火车", "列车", "返程")
+
+
+def _normalize_clock(value: str | None) -> str | None:
+    if not value or not _CLOCK_PATTERN.fullmatch(value):
+        return None
+    hour, minute = value.split(":", 1)
+    return f"{int(hour):02d}:{minute}"
+
+
+def _time_window_problems(data: ItineraryData, user_text: str) -> list[str]:
+    """Check explicit Chinese departure windows against the generated timeline."""
+    try:
+        year = int(data.trip_info.start_date[:4])
+    except (TypeError, ValueError):
+        return []
+    days = {day.date: day for day in data.itinerary}
+    problems: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for match in _TIME_WINDOW_PATTERN.finditer(user_text):
+        destination_match = _DESTINATION_PATTERN.search(match.group("clause"))
+        if not destination_match:
+            continue
+        date = f"{year:04d}-{int(match.group('month')):02d}-{int(match.group('day')):02d}"
+        period = match.group("period")
+        destination = destination_match.group("destination")
+        anchor = (date, period, destination)
+        if anchor in seen:
+            continue
+        seen.add(anchor)
+        earliest, latest = _TIME_WINDOW_BOUNDS[period]
+        day = days.get(date)
+        matched = False
+        if day:
+            for schedule in day.schedules:
+                text = " ".join(
+                    part
+                    for part in (
+                        schedule.activity,
+                        schedule.transport,
+                        schedule.place_name,
+                    )
+                    if part
+                )
+                if destination not in text and not any(
+                    marker in text for marker in _INTERCITY_MARKERS
+                ):
+                    continue
+                candidate_times = [schedule.start_time or ""]
+                candidate_times.extend(_CLOCK_PATTERN.findall(text))
+                normalized_times = [
+                    normalized
+                    for value in candidate_times
+                    if (normalized := _normalize_clock(value)) is not None
+                ]
+                if any(earliest <= value <= latest for value in normalized_times):
+                    matched = True
+                    break
+        if not matched:
+            problems.append(
+                f"{date} {period}前往{destination}缺少 {earliest}–{latest} 内的独立跨城交通日程"
+            )
+    return problems
+
+
+def _schedule_overlap_problems(data: ItineraryData) -> list[str]:
+    """Describe overlapping timed schedules for a targeted model correction."""
+    problems: list[str] = []
+    for day in data.itinerary:
+        timed = sorted(
+            (
+                schedule
+                for schedule in day.schedules
+                if _normalize_clock(schedule.start_time) is not None
+            ),
+            key=lambda schedule: _normalize_clock(schedule.start_time) or "",
+        )
+        previous = None
+        for schedule in timed:
+            if (
+                previous is not None
+                and previous.end_time
+                and schedule.start_time
+                and (_normalize_clock(schedule.start_time) or "")
+                < (_normalize_clock(previous.end_time) or "")
+            ):
+                problems.append(
+                    f"{day.date} 的 {previous.id}（至 {previous.end_time}）与 "
+                    f"{schedule.id}（{schedule.start_time} 开始）时间重叠"
+                )
+            if schedule.end_time and _CLOCK_PATTERN.fullmatch(schedule.end_time):
+                previous = schedule
+    return problems
+
+
+def _repair_time_window_violations(
+    *,
+    system_prompt: str,
+    user_text: str,
+    itinerary: ItineraryData,
+    planning_model: PlanningModel,
+) -> ItineraryData:
+    """Run one no-tools targeted retry only when an explicit time anchor is broken."""
+    if planning_model not in DEEPSEEK_PLANNING_MODELS:
+        return itinerary
+    problems = _time_window_problems(itinerary, user_text)
+    problems.extend(_schedule_overlap_problems(itinerary))
+    if not problems:
+        return itinerary
+    log_event(
+        "planning_time_window_repair",
+        status="start",
+        problems=problems,
+        planning_model=planning_model,
+    )
+    current = json.dumps(itinerary.model_dump(mode="json"), ensure_ascii=False)
+    repair = vivo_chat_client.chat_messages(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "以下行程已完成事实检索，但违反了用户明确的跨城出发时段。"
+                    "只修复列出的问题：将跨城交通拆成独立 schedule，start_time 必须是"
+                    "时间窗内的实际出发时间；保留其他行程、fact_refs 和地图语义字段，"
+                    "消除时间重叠。不得调用工具，只输出完整 ItineraryData JSON。\n"
+                    f"【用户需求】{user_text[:4000]}\n"
+                    f"【必须修复】{json.dumps(problems, ensure_ascii=False)}\n"
+                    f"【当前行程】{current}"
+                ),
+            },
+        ],
+        tools=None,
+        stage="planning_time_window_repair",
+        temperature=0.0,
+        max_completion_tokens=10000,
+        planning_model=planning_model,
+        response_format={"type": "json_object"},
+        thinking_enabled=False,
+        max_attempts=1,
+    )
+    if not repair.content:
+        raise AIGenerationError("时间窗定点修复未返回内容")
+    repaired = output_parser.parse_model_json(repair.content, ItineraryData)
+    remaining = _time_window_problems(repaired, user_text)
+    remaining.extend(_schedule_overlap_problems(repaired))
+    if remaining:
+        raise AIGenerationError(f"时间窗定点修复仍不合格：{'; '.join(remaining)}")
+    log_event(
+        "planning_time_window_repair",
+        status="success",
+        problem_count=len(problems),
+        planning_model=planning_model,
+    )
+    return repaired
+
+
 def _generate_itinerary_from_research(
     *,
     system_prompt: str,
@@ -2212,6 +2414,16 @@ def _generate_itinerary_from_research(
         " fact_refs，只有 status=ok 的高德事实可标 verified，"
         + reference_fact_rule
         + " transport_mode 只能是 driving/transit/walking/bicycling 或 null；飞机、铁路等大交通写入 transport，transport_mode=null。"
+        "用户明确的日期与时段是不可改写的硬约束：早上须在 06:00–11:59 出发，"
+        "傍晚须在 17:00–19:30 出发，晚上须在 18:00 以后出发；没有已核验班次时，"
+        "只能在原时间窗内给 reference 方案，不得用其他时段替代。"
+        "同一天任一日程的 start_time 不得早于上一日程的 end_time，禁止时间重叠；"
+        "备选交通不得与同日活动同时排入主时间线。"
+        "每段带时段硬约束的跨城交通必须单独成为一条 schedule，start_time 填实际发车或起飞时间；"
+        "去车站、取行李、候车等准备活动不得与该跨城交通合并为同一条。"
+        "每段跨城交通只能给一个可执行的主方案，禁止在主时间线写“高铁或航班”等二选一；"
+        "每个具名酒店和景点优先使用保留事实中的名称、坐标与 fact_id，已有匹配事实却标 unverified"
+        " 属于不合格；不得为了凑满日程编造未检索的具名景点。"
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
