@@ -1472,7 +1472,12 @@ def _plan_with_tools(
             stage="planning_research",
             max_completion_tokens=_MAX_GENERATION_TOKENS,
             planning_model=planning_model,
-            reasoning_effort=_RESEARCH_REASONING_EFFORT,
+            # DeepSeek keeps its provider default (high); Doubao research stays low.
+            reasoning_effort=(
+                "high"
+                if planning_model in DEEPSEEK_PLANNING_MODELS
+                else _RESEARCH_REASONING_EFFORT
+            ),
         )
         log_event(
             "planning_tool_round_result",

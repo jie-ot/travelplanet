@@ -32,10 +32,10 @@ export function ReportsView() {
   }
 
   return (
-    <>
+    <div className="flex h-full min-h-0 flex-col">
       <TopBar title="旅行人格档案" subtitle="读懂旅途中的你" />
 
-      <div className="flex-1 overflow-y-auto no-scrollbar px-4 pb-10 pt-4 min-[400px]:px-5 min-[400px]:pt-5">
+      <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar px-4 pb-10 pt-4 min-[400px]:px-5 min-[400px]:pt-5">
         {reports.length === 0 ? (
           <EmptyState
             icon={<FileChartColumn className="size-7" aria-hidden />}
@@ -86,7 +86,7 @@ export function ReportsView() {
           { label: "取消", variant: "ghost", onClick: () => setPendingDelete(null) },
         ]}
       />
-    </>
+    </div>
   )
 }
 

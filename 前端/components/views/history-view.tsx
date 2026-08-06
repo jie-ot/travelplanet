@@ -26,10 +26,10 @@ export function HistoryView() {
   const deleting = !!pendingDelete && deletingId === pendingDelete.id
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <TopBar title="历史规划" />
 
-      <div className="flex-1 overflow-y-auto no-scrollbar px-4 py-4 min-[400px]:px-5 min-[400px]:py-5">
+      <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar px-4 py-4 min-[400px]:px-5 min-[400px]:py-5">
         {plans.length === 0 ? (
           <EmptyState
             icon={<Compass className="size-7" aria-hidden />}

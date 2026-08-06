@@ -50,19 +50,16 @@ export function PlanningConversation({
   onSend,
   onConfirm,
 }: PlanningConversationProps) {
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
-    })
+    bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" })
   }, [busy, messages, phase])
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="planning-conversation">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain no-scrollbar">
         <div className="space-y-4 px-4 pb-5 pt-4 min-[400px]:px-5">
           <section className="overflow-hidden rounded-[1.35rem] border border-white/15 bg-[linear-gradient(145deg,#07516b_0%,#087b88_100%)] px-4 py-3.5 text-white shadow-[0_16px_34px_-26px_rgba(3,47,71,0.95)] ring-1 ring-[#b8ece7]/10">
             <p className="text-[13px] font-medium leading-5 text-white/82">
@@ -235,10 +232,12 @@ export function PlanningConversation({
               </div>
             </section>
           ) : null}
+
+          <div ref={bottomRef} aria-hidden className="h-px w-full shrink-0" />
         </div>
       </div>
 
-      <div className="shrink-0 border-t border-[#0a3850]/10 bg-card/96 px-4 py-3 shadow-[0_-12px_30px_-26px_rgba(6,45,72,0.7)] backdrop-blur min-[400px]:px-5">
+      <div className="shrink-0 border-t border-[#0a3850]/10 bg-card/96 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-12px_30px_-26px_rgba(6,45,72,0.7)] backdrop-blur min-[400px]:px-5">
         <div className="flex items-end gap-2">
           <textarea
             ref={inputRef}

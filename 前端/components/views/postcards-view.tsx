@@ -32,10 +32,10 @@ export function PostcardsView() {
   }
 
   return (
-    <>
+    <div className="flex h-full min-h-0 flex-col">
       <TopBar title="我的明信片" subtitle="旅行的高光时刻" />
 
-      <div className="flex-1 overflow-y-auto no-scrollbar px-4 pb-10 pt-4 min-[400px]:px-5 min-[400px]:pt-5">
+      <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar px-4 pb-10 pt-4 min-[400px]:px-5 min-[400px]:pt-5">
         {postcardGroups.length === 0 ? (
           <EmptyState
             icon={<Images className="size-7" aria-hidden />}
@@ -87,7 +87,7 @@ export function PostcardsView() {
           { label: "取消", variant: "ghost", onClick: () => setPendingDelete(null) },
         ]}
       />
-    </>
+    </div>
   )
 }
 

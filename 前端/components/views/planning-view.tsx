@@ -249,7 +249,7 @@ export function PlanningView() {
   )
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <TopBar
         title={editingPlanId ? "重新编辑规划" : "旅行规划"}
         onBack={() => guardedLeave(() => leavePlanning(goBack))}
@@ -271,7 +271,7 @@ export function PlanningView() {
         }
       />
 
-      <div className="min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {phase === "conversation" && (
           <PlanningConversation
             messages={chatMessages}

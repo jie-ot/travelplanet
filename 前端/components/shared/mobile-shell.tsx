@@ -10,10 +10,10 @@ import { cn } from "@/lib/utils"
  */
 export function MobileShell({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div className="relative flex min-h-dvh w-full justify-center bg-[#dce7e9]">
+    <div className="relative flex h-dvh w-full justify-center overflow-hidden bg-[#dce7e9]">
       <main
         className={cn(
-          "relative flex min-h-dvh w-full max-w-md flex-col overflow-hidden bg-background",
+          "relative flex h-dvh w-full max-w-md flex-col overflow-hidden bg-background",
           "shadow-[0_0_56px_-24px_rgba(6,45,72,0.32)]",
           className,
         )}
@@ -31,8 +31,8 @@ export function MobileShell({ children, className }: { children: ReactNode; clas
           <div className="absolute inset-0 opacity-40 [background-image:linear-gradient(115deg,rgba(7,49,73,0.025)_1px,transparent_1px)] [background-size:18px_18px]" />
         </div>
 
-        {/* 内容层 */}
-        <div className="relative z-10 flex min-h-dvh flex-col">{children}</div>
+        {/* 内容层：锁定视口高度，内部页面自行滚动 */}
+        <div className="relative z-10 flex h-full min-h-0 flex-1 flex-col">{children}</div>
       </main>
     </div>
   )

@@ -14,9 +14,9 @@ export function HistoryDetailView() {
 
   if (!plan) {
     return (
-      <div className="flex h-full flex-col">
+      <div className="flex h-full min-h-0 flex-col">
         <TopBar title="规划详情" />
-        <div className="flex-1 overflow-y-auto no-scrollbar">
+        <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar">
           <EmptyState
             icon={<Compass className="size-7" aria-hidden />}
             title="规划不存在"
@@ -28,9 +28,9 @@ export function HistoryDetailView() {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <TopBar title={plan.location} subtitle={plan.dateLabel} />
-      <div className="flex-1 overflow-y-auto no-scrollbar">
+      <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar">
         <ItineraryDetail data={plan.itineraryData} />
       </div>
     </div>
