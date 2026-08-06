@@ -146,6 +146,8 @@ export interface PlanningBrief {
   constraints: string[]
   assumptions: string[]
   summary: string
+  /** Residual requirements not covered by the structured checklist rows. */
+  detailRequirements?: string
 }
 
 export interface PlanningChecklistItem {
@@ -165,6 +167,56 @@ export interface PlanningResponse {
   itinerary: ItineraryData | null
 }
 
+/** 规划阶段。与后端 planning_progress 的 stage 取值一一对应。 */
+export type PlanningProgressStage =
+  | "queued"
+  | "reading_memory"
+  | "collecting_requirements"
+  | "prefetching_facts"
+  | "understanding_request"
+  | "researching"
+  | "research_complete"
+  | "selecting_facts"
+  | "synthesizing"
+  | "verifying"
+  | "finalizing"
+  | "completed"
+  | "failed"
+
+export type PlanningProgressPhase =
+  | "preparing"
+  | "researching"
+  | "composing"
+  | "verifying"
+  | "completed"
+  | "failed"
+
+/**
+ * 生成过程中的真实后端进度快照（GET /ai/planning/progress）。
+ * 规划本身仍是一次阻塞 POST，本快照只供待机动画展示，缺失时不影响出图。
+ */
+export interface PlanningProgressSnapshot {
+  token: string
+  stage: PlanningProgressStage
+  stageLabel: string
+  phase: PlanningProgressPhase
+  percent: number
+  detail: string | null
+  elapsedMs: number
+  estimatedTotalMs: number
+  estimatedRemainingMs: number
+  researchRound: number
+  targetRounds: number
+  maxRounds: number
+  toolCallCount: number
+  factCount: number
+  repairRound: number
+  planningModel: PlanningModel | null
+  recentActivities: string[]
+  error: string | null
+  done: boolean
+}
+
 /* ---------------- 结构化行程数据 (ItineraryData) ---------------- */
 
 export interface ItineraryData {
@@ -174,6 +226,8 @@ export interface ItineraryData {
   food_recommendations: string[]
   itinerary: DailyItinerary[]
   experience_summary?: ExperienceSummary | null
+  /** Gate-authored caveats for findings that are not tied to a single schedule row. */
+  advisories?: string[]
 }
 
 export interface ExperienceSummary {

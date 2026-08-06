@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from app.ai import orchestrator
+from app.core import planning_progress
 from app.core.business_logging import log_event, timed_stage
 from app.core.exceptions import (
     AIGenerationError,
@@ -64,6 +65,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
         raise InvalidParamError("规划需求不能为空")
     _validate_conversation_model(request)
 
+    planning_progress.report("reading_memory")
     with timed_stage("planning_read_memory"):
         with session_scope() as session:
             memory = memory_service.get_or_create_current_memory(session, user_id)
@@ -81,7 +83,14 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
         if request.context is None:
             if request.brief is None:
                 raise InvalidParamError("确认生成前缺少旅行需求清单")
-            brief = planning_intake_service.normalize_brief(request.brief)
+            brief = planning_intake_service.finalize_brief(
+                request.brief,
+                user_messages=[
+                    message.content
+                    for message in request.messages
+                    if message.role == "user" and message.content.strip()
+                ],
+            )
             missing = planning_intake_service.missing_required_fields(brief)
             if missing:
                 log_event(
@@ -125,6 +134,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
         )
         fact_pack_dict = None
         if travel_fact_service.needs_facts(planning_message, request.context):
+            planning_progress.report("prefetching_facts")
             with timed_stage("planning_build_fact_pack"):
                 try:
                     pack = travel_fact_service.build_fact_pack(
@@ -200,6 +210,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             )
         # Schedule order is deterministic, so correct model ordering mistakes
         # before positional stable-ID alignment and business validation.
+        planning_progress.report("finalizing")
         with timed_stage(
             "planning_align_and_validate",
             request_id=request_id,
@@ -281,6 +292,7 @@ def _collect_requirements(
             arguments=arguments,
         )
 
+    planning_progress.report("collecting_requirements")
     with timed_stage(
         "planning_collect_requirements",
         request_id=request_id,
@@ -295,7 +307,14 @@ def _collect_requirements(
             execute_tool=_execute_tool,
             planning_model=request.planning_model,
         )
-    brief = planning_intake_service.normalize_brief(intake.brief)
+    brief = planning_intake_service.finalize_brief(
+        intake.brief,
+        user_messages=[
+            message.content
+            for message in messages
+            if message.role == "user" and message.content.strip()
+        ],
+    )
     missing = planning_intake_service.missing_required_fields(brief)
     phase = "collecting" if missing else "confirming"
     assistant_message = intake.assistant_message.strip()

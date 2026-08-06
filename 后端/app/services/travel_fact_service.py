@@ -10,6 +10,7 @@ structured official entry. Function Calling facts are executed here through
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
 import logging
 import re
 import threading
@@ -20,6 +21,7 @@ from pydantic import ValidationError
 from app.ai.tools import (
     amap_provider,
     entry_guides,
+    flight_text_parser,
     rail_mcp_provider,
     tool_specs,
     variflight_aviation_provider,
@@ -331,9 +333,62 @@ def _diagnostic_value(value, *, depth: int = 0):  # noqa: ANN001, ANN202
     return value
 
 
+AMAP_FORECAST_HORIZON_DAYS = 3
+
+
+def _beyond_forecast_horizon(start_date: str) -> bool:
+    """Whether even the first requested day is past AMap's forecast horizon."""
+    today = datetime.now(timezone(timedelta(hours=8))).date()
+    try:
+        start = date.fromisoformat(start_date)
+    except (TypeError, ValueError):
+        return False
+    return (start - today).days >= AMAP_FORECAST_HORIZON_DAYS
+
+
 def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
     weather_query = args.adcode
+    if _beyond_forecast_horizon(args.start_date):
+        # AMap only publishes today plus the next two days. Calling it for a
+        # trip weeks out burns budget and returns an all-unknown block that
+        # earlier logged as a provider failure.
+        result = {
+            "tool": tool_specs.TOOL_AMAP_WEATHER_RANGE,
+            "status": "out_of_forecast_horizon",
+            "city": args.city,
+            "adcode": weather_query,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "forecast_horizon_days": AMAP_FORECAST_HORIZON_DAYS,
+            "days": [],
+            "note": (
+                f"{args.start_date} 距今超过高德 {AMAP_FORECAST_HORIZON_DAYS} 天预报范围，"
+                "未发起查询。请勿用近日预报冒充，只能给出该地该季节的常规气候提示，"
+                "并在 bookings/preparations 中提示出行前复核官方预报。"
+            ),
+            "retryable": False,
+        }
+        _persist_log(
+            user_id,
+            request_id,
+            task_type,
+            tool_name=tool_specs.TOOL_AMAP_WEATHER_RANGE,
+            provider="amap",
+            status="out_of_forecast_horizon",
+            degraded_to_b=False,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            input_summary={
+                "city": args.city,
+                "adcode": weather_query,
+                "start_date": args.start_date,
+                "end_date": args.end_date,
+                "skipped": True,
+            },
+            output_summary={"days": []},
+            error_code=None,
+        )
+        return result
     if amap_provider.is_available():
         weather_query = weather_query or amap_provider.resolve_city_adcode(args.city)
         facts = amap_provider.weather_range(
@@ -745,11 +800,16 @@ def _rail_list_summary(facts: list[RailFact]) -> list[dict]:
 def _tripmatch_output_summary(outcome) -> dict:  # noqa: ANN001
     payload = outcome.provider_payload
     upstream_request_id = payload.get("request_id") if isinstance(payload, dict) else None
+    candidates = _flight_candidates(outcome)
     return {
         "provider_status": outcome.status,
         "payload_type": type(payload).__name__ if payload is not None else None,
         "payload_keys": list(payload)[:30] if isinstance(payload, dict) else [],
-        "candidate_count": len(_tripmatch_candidates(payload)),
+        "candidate_count": len(candidates),
+        "structured_candidate_count": len(_tripmatch_candidates(payload)),
+        "parsed_flight_nos": [
+            str(item.get("flight_no")) for item in candidates if item.get("flight_no")
+        ][:20],
         "reported_candidate_count": _reported_candidate_count(
             payload, outcome.raw_text
         ),
@@ -774,6 +834,20 @@ def _reported_candidate_count(payload, raw_text: str | None) -> int | None:  # n
         if match:
             return int(match.group(1))
     return None
+
+
+def _flight_candidates(outcome) -> list[dict]:  # noqa: ANN001
+    """Structure the upstream answer, whichever shape it arrives in.
+
+    VariFlight currently answers in Chinese prose, so text parsing is tried
+    first; the record-list walk stays as a fallback for a future structured
+    response.
+    """
+    text = flight_text_parser.provider_text(outcome.provider_payload, outcome.raw_text)
+    parsed = flight_text_parser.parse_flight_text(text)
+    if parsed:
+        return parsed
+    return _tripmatch_candidates(outcome.provider_payload)
 
 
 def _tripmatch_candidates(value, *, depth: int = 0) -> list[dict]:  # noqa: ANN001
@@ -833,11 +907,21 @@ def _tripmatch_result(  # noqa: ANN001
         "provider_raw_text": outcome.raw_text,
         "provider_parsed_content": outcome.content,
     }
-    candidates = _tripmatch_candidates(outcome.provider_payload)
+    candidates = _flight_candidates(outcome)
     if candidates:
         # Each independently selectable flight/transfer can receive its own
         # fact_id while the original provider payload remains lossless.
         result["candidates"] = candidates
+    # `provider_payload`/`provider_raw_text` are stripped before the model sees
+    # the fact, so the upstream answer must also survive in a bounded field.
+    # Without this the model receives status=ok with no schedule and invents
+    # departure times.
+    text = flight_text_parser.provider_text(outcome.provider_payload, outcome.raw_text)
+    if text:
+        result["provider_summary_text"] = text
+    result.update(flight_text_parser.parse_flight_summary(text))
+    if candidates:
+        result.update(flight_text_parser.departure_window(candidates))
     if outcome.error_code:
         result["error_code"] = outcome.error_code
     if outcome.error_message:

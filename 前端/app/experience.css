@@ -459,6 +459,11 @@
 .itinerary-destination { display: flex; align-items: center; gap: .35rem; color: var(--trip-accent); font-size: .8rem; font-weight: 750; letter-spacing: .06em; }
 .itinerary-hero h1 { max-width: 22rem; margin-top: .55rem; font-family: var(--font-display); font-size: clamp(1.8rem, 7.4vw, 2.4rem); font-weight: 900; line-height: 1.1; letter-spacing: -.045em; text-wrap: balance; }
 .itinerary-date { display: flex; align-items: center; gap: .45rem; margin-top: .65rem; color: rgb(255 255 255 / .7); font-family: var(--font-editorial); font-size: .86rem; }
+.itinerary-advisories { margin: .75rem 1rem 0; padding: .75rem .85rem; color: #7a4a0c; border: 1px solid rgb(214 138 22 / .28); border-radius: .9rem; background: #fdf1dc; }
+.itinerary-advisories-title { display: flex; align-items: center; gap: .4rem; font-size: .78rem; font-weight: 850; }
+.itinerary-advisories ul { display: flex; flex-direction: column; gap: .35rem; margin: .45rem 0 0; padding: 0; list-style: none; }
+.itinerary-advisories li { color: #6d4a16; font-size: .74rem; line-height: 1.5; }
+.itinerary-advisories li::before { content: '· '; font-weight: 850; }
 .itinerary-summary-grid { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .9rem; margin-top: 2rem; padding: 1rem; border: 1px solid rgb(255 255 255 / .15); border-radius: 1.15rem; background: rgb(4 15 27 / .25); box-shadow: inset 0 1px rgb(255 255 255 / .08); backdrop-filter: blur(18px); }
 .itinerary-summary-grid > div:first-child { display: flex; flex-direction: column; gap: .35rem; }
 .itinerary-summary-grid span { color: rgb(255 255 255 / .56); font-size: .68rem; }
@@ -496,6 +501,8 @@
 .itinerary-card-meta time span { padding: .2rem .38rem; color: #315d68; font-size: .72rem; border-radius: 999px; background: #e2eff0; }
 .itinerary-card-meta time b { font-weight: 850; }
 .itinerary-card-meta span { display: flex; align-items: center; gap: .25rem; color: #738894; font-size: .64rem; }
+.itinerary-card-meta .itinerary-unconfirmed { padding: .2rem .42rem; color: #9a5308; font-size: .64rem; font-weight: 800; border: 1px solid rgb(214 138 22 / .28); border-radius: 999px; background: #fdf1dc; }
+.itinerary-card-meta .itinerary-unconfirmed svg { color: #c07a12; }
 .itinerary-card h3 { display: flex; align-items: flex-start; gap: .45rem; margin-top: .55rem; font-family: var(--font-display); font-size: .94rem; font-weight: 850; line-height: 1.4; }
 .itinerary-card h3 svg { flex: none; margin-top: .12rem; color: #078fab; }
 .itinerary-activity { margin-top: .4rem; color: #617684; font-size: .73rem; line-height: 1.6; }
@@ -533,25 +540,42 @@
 .itinerary-food > div:last-child span { padding: .5rem .7rem; color: #6f4f44; font-family: var(--font-editorial); font-size: .68rem; border: 1px solid rgb(232 121 85 / .14); border-radius: 999px; background: #f8e9de; }
 
 /* AI exploration progress */
-.planning-progress { position: relative; display: flex; min-height: 34rem; flex-direction: column; align-items: center; overflow: hidden; padding: 2.4rem 1.1rem 1.25rem; color: white; border-radius: 1.6rem; background: radial-gradient(circle at 50% 20%, rgb(74 207 218 / .25), transparent 31%), linear-gradient(160deg, #082d49, #101630 72%); box-shadow: 0 24px 52px -30px rgb(6 45 72 / .9); }
-.planning-progress-orbit { position: relative; width: 8.5rem; height: 8.5rem; border: 1px solid rgb(102 226 230 / .35); border-radius: 50%; box-shadow: inset 0 0 40px rgb(64 204 216 / .1), 0 0 34px rgb(64 204 216 / .16); animation: planet-spin 12s linear infinite; }
+/* 阶段切换会增删「近期动作」等区块；固定最小高度避免卡片忽长忽短 */
+.planning-progress { position: relative; display: flex; min-height: 34rem; flex-direction: column; align-items: center; overflow: hidden; padding: 2.1rem 1.1rem 1.35rem; color: white; border-radius: 1.6rem; background: radial-gradient(circle at 50% 18%, rgb(74 207 218 / .25), transparent 34%), linear-gradient(160deg, #082d49, #101630 72%); box-shadow: 0 24px 52px -30px rgb(6 45 72 / .9); }
+/* 真实完成度：进度环由 --progress 驱动，conic-gradient 的硬边界即当前百分比 */
+.planning-progress-dial { position: relative; display: grid; width: 10.2rem; height: 10.2rem; place-items: center; border-radius: 50%; background: conic-gradient(#73d4df 0 var(--progress, 0%), rgb(178 222 238 / .34) var(--progress, 0%) 100%); box-shadow: 0 0 34px rgb(64 204 216 / .18); transition: background .6s ease; }
+.planning-progress-dial::after { position: absolute; inset: .42rem; content: ''; border-radius: 50%; background: linear-gradient(165deg, #0a3352, #111834); }
+/* 不再画装饰性外环：外圈已经是真实完成度刻度，两个同心环会让读数含义变模糊 */
+.planning-progress-orbit { position: relative; z-index: 1; width: 8.5rem; height: 8.5rem; border-radius: 50%; box-shadow: inset 0 0 40px rgb(64 204 216 / .1); animation: planet-spin 12s linear infinite; }
 .planning-progress-orbit::before { position: absolute; inset: 1.25rem; content: ''; border-radius: 50%; background: radial-gradient(circle at 35% 28%, white, #61d9df 8%, #276dac 43%, #131c49 75%); box-shadow: 0 0 28px rgb(82 221 225 / .42); animation: sphere-float 4s ease-in-out infinite; }
 .planning-progress-orbit span { position: absolute; width: .42rem; height: .42rem; border-radius: 50%; background: white; box-shadow: 0 0 10px #61d9df; }
 .planning-progress-orbit span:nth-child(1) { top: 8%; left: 48%; }
 .planning-progress-orbit span:nth-child(2) { right: 6%; bottom: 28%; }
 .planning-progress-orbit span:nth-child(3) { bottom: 2%; left: 28%; }
-.planning-progress-copy { margin-top: 1.5rem; text-align: center; }
+/* 球体高光正好在圆心，读数需要不透明底衬才看得清 */
+.planning-progress-readout { position: absolute; z-index: 2; display: flex; align-items: baseline; gap: .08rem; padding: .34rem .7rem .38rem; border: 1px solid rgb(115 212 223 / .3); border-radius: 999px; background: rgb(5 20 38 / .88); box-shadow: 0 6px 18px -8px rgb(0 0 0 / .7); }
+.planning-progress-readout strong { font-family: var(--font-display); font-size: 1.55rem; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1; }
+.planning-progress-readout span { color: #73d4df; font-size: .72rem; font-weight: 750; }
+.planning-progress-copy { margin-top: 1.3rem; text-align: center; }
 .planning-progress-copy > p { color: #73d4df; font-size: .68rem; font-weight: 750; letter-spacing: .13em; }
 .planning-progress-copy h2 { margin-top: .45rem; font-family: var(--font-display); font-size: 1.22rem; font-weight: 850; }
 .planning-progress-copy > span { display: block; margin-top: .5rem; color: rgb(255 255 255 / .48); font-size: .65rem; line-height: 1.55; }
-.planning-progress ol { display: flex; width: 100%; flex-direction: column; gap: .2rem; margin-top: 1.45rem; }
+.planning-progress-stats { display: grid; width: 100%; grid-template-columns: repeat(4, 1fr); gap: .4rem; margin-top: 1.25rem; }
+.planning-progress-stats > div { padding: .5rem .3rem; text-align: center; border: 1px solid rgb(255 255 255 / .08); border-radius: .8rem; background: rgb(255 255 255 / .05); }
+.planning-progress-stats dt { color: rgb(255 255 255 / .42); font-size: .58rem; font-weight: 700; letter-spacing: .04em; }
+.planning-progress-stats dd { margin-top: .2rem; font-family: var(--font-display); font-size: .82rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.planning-progress ol { display: flex; width: 100%; flex-direction: column; gap: .2rem; margin-top: 1.1rem; }
 .planning-progress li { display: flex; min-height: 2.65rem; align-items: center; gap: .7rem; padding: .45rem .6rem; color: rgb(255 255 255 / .34); border-radius: .8rem; transition: color .35s, background .35s, transform .35s; }
 .planning-progress li > span { display: grid; width: 1.65rem; height: 1.65rem; flex: none; place-items: center; border: 1px solid rgb(255 255 255 / .12); border-radius: 50%; }
 .planning-progress li svg { width: .8rem; height: .8rem; }
-.planning-progress li p { font-size: .7rem; font-weight: 650; }
+.planning-progress li p { flex: 1; font-size: .7rem; font-weight: 650; }
+.planning-progress li em { color: #73d4df; font-size: .62rem; font-weight: 750; font-style: normal; font-variant-numeric: tabular-nums; }
 .planning-progress li.is-done { color: rgb(160 230 218 / .66); }
 .planning-progress li.is-active { color: white; background: rgb(255 255 255 / .08); transform: translateX(.25rem); }
 .planning-progress li.is-active > span { color: #062d48; border-color: #73d4df; background: #73d4df; box-shadow: 0 0 16px rgb(115 212 223 / .52); animation: orbit-pulse 2s ease-in-out infinite; }
+.planning-progress-activities { display: flex; width: 100%; flex-direction: column; gap: .3rem; margin-top: 1.05rem; padding-top: .9rem; border-top: 1px solid rgb(255 255 255 / .08); }
+.planning-progress-activities li { display: flex; min-height: 0; align-items: center; gap: .4rem; padding: 0; color: rgb(255 255 255 / .62); font-size: .64rem; line-height: 1.5; border-radius: 0; animation: materialize-in .3s both; }
+.planning-progress-activities svg { width: .68rem; height: .68rem; flex: none; color: #73d4df; }
 
 @keyframes persona-drift { to { transform: translate(calc(var(--parallax-x) + 8%), calc(var(--parallax-y) - 4%)) rotate(8deg) scale(1.08); } }
 @keyframes sphere-float { 0%, 100% { translate: 0 0; } 50% { translate: 0 -8px; } }
@@ -577,5 +601,6 @@
   .persona-aurora, .persona-sphere-wrap, .persona-sphere, .persona-orbit, .persona-title-lockup,
   .persona-title-lockup::after, .persona-journal-doodle, .persona-scroll-cue, .persona-keywords span, .persona-reveal,
   .itinerary-hero-light, .itinerary-stop, .planning-progress-orbit, .planning-progress-orbit::before,
+  .planning-progress-activities li,
   .planning-progress li.is-active > span { animation: none !important; }
 }

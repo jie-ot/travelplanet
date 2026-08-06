@@ -5,7 +5,14 @@
  * 端点路径不含 /api 前缀（base 已含），严格对齐《数据结构与通信接口规范》三与四。
  * 本文件不处理 code/message/data，也不做本地数据兜底。
  */
-import type { ItineraryData, Plan, PlanningResponse, PostcardGroup, Report } from "@/types"
+import type {
+  ItineraryData,
+  Plan,
+  PlanningProgressSnapshot,
+  PlanningResponse,
+  PostcardGroup,
+  Report,
+} from "@/types"
 import { apiClient, jsonInit } from "./http-client"
 import type { GenerateInput, GenerateResult, PlanWithAIInput, TravelApi } from "./api"
 
@@ -38,6 +45,12 @@ export const realApi: TravelApi = {
 
   planWithAI(input: PlanWithAIInput) {
     return apiClient<PlanningResponse>("/ai/planning", jsonInit("POST", input))
+  },
+
+  getPlanningProgress(token: string) {
+    return apiClient<PlanningProgressSnapshot | null>(
+      `/ai/planning/progress?token=${encodeURIComponent(token)}`,
+    )
   },
 
   createPlan(input: { itineraryData: ItineraryData }) {

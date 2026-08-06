@@ -11,6 +11,7 @@ import {
 import { PlanningProgress } from "@/components/shared/planning-progress"
 import { PlanningModelSelector } from "@/components/shared/planning-model-selector"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
+import { usePlanningProgress } from "@/lib/use-planning-progress"
 import { Sparkles, Save, RotateCcw, History, Send } from "lucide-react"
 import type { PlanningBrief, PlanningChecklistItem, PlanningModel } from "@/types"
 
@@ -36,6 +37,7 @@ export function PlanningView() {
     editingPlanId,
     hasUnsavedDraft,
     planning,
+    planningProgressToken,
     planningTurn,
     planRefine,
     beginNewPlan,
@@ -69,6 +71,8 @@ export function PlanningView() {
       : draftItineraryData
         ? "result"
         : "conversation"
+  // 只在待机屏可见时轮询；对话澄清轮不占用额外请求。
+  const progress = usePlanningProgress(planningProgressToken, phase === "generating")
   const conversationModelLocked = chatMessages.some(
     (message) => !!message.planningModel,
   )
@@ -285,8 +289,8 @@ export function PlanningView() {
         )}
 
         {phase === "generating" && (
-          <div className="h-full overflow-y-auto px-4 py-6 min-[400px]:px-5">
-            <PlanningProgress />
+          <div className="h-full overflow-y-auto px-4 py-6 no-scrollbar min-[400px]:px-5">
+            <PlanningProgress snapshot={progress} />
           </div>
         )}
 

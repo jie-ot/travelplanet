@@ -8,6 +8,7 @@ import type {
   PlanningBrief,
   PlanningChatMessage,
   PlanningModel,
+  PlanningProgressSnapshot,
   PlanningResponse,
   PostcardGroup,
   Report,
@@ -33,6 +34,8 @@ export interface PlanWithAIInput {
   messages?: PlanningChatMessage[]
   brief?: PlanningBrief | null
   confirmed?: boolean
+  /** 客户端生成的进度令牌；带上后可用 getPlanningProgress 轮询真实阶段。 */
+  progressToken?: string
 }
 
 /** 后端能力契约。 */
@@ -48,6 +51,7 @@ export interface TravelApi {
 
   // 旅行前流
   planWithAI(input: PlanWithAIInput): Promise<PlanningResponse>
+  getPlanningProgress(token: string): Promise<PlanningProgressSnapshot | null>
   createPlan(input: { itineraryData: ItineraryData }): Promise<Plan>
   updatePlan(id: string, input: { itineraryData: ItineraryData }): Promise<Plan>
 
@@ -74,6 +78,9 @@ export function generateTravelArtifacts(input: GenerateInput): Promise<GenerateR
 }
 export function planWithAI(input: PlanWithAIInput): Promise<PlanningResponse> {
   return realApi.planWithAI(input)
+}
+export function getPlanningProgress(token: string): Promise<PlanningProgressSnapshot | null> {
+  return realApi.getPlanningProgress(token)
 }
 export function createPlan(input: { itineraryData: ItineraryData }): Promise<Plan> {
   return realApi.createPlan(input)

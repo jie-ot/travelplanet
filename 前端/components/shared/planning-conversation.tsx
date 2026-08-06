@@ -177,10 +177,13 @@ export function PlanningConversation({
                       : item.status === "assumed"
                         ? WandSparkles
                         : CircleAlert
+                  const isDetail = item.key === "detailRequirements"
                   return (
                     <div
                       key={item.key}
                       className={`rounded-xl border px-3 py-2.5 ${
+                        isDetail ? "sm:col-span-2" : ""
+                      } ${
                         item.status === "missing"
                           ? "border-amber-300/70 bg-amber-50"
                           : "border-[#0a3850]/8 bg-white/72"
@@ -199,7 +202,11 @@ export function PlanningConversation({
                         />
                         {item.label}
                       </dt>
-                      <dd className="mt-1 text-sm font-semibold leading-5 text-[#0a3850]">
+                      <dd
+                        className={`mt-1 font-semibold leading-5 text-[#0a3850] ${
+                          isDetail ? "text-sm whitespace-pre-wrap" : "text-sm"
+                        }`}
+                      >
                         {item.value}
                       </dd>
                     </div>

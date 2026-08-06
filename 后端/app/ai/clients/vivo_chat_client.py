@@ -8,6 +8,7 @@ Chat Completions endpoint. Provider-specific parameters stay in this adapter.
 from __future__ import annotations
 
 import logging
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -28,6 +29,10 @@ _DEEPSEEK_REASONING_EFFORT = "high"
 _DEEPSEEK_THINKING_EXTRA_BODY: dict[str, Any] = {
     "thinking": {"type": "enabled"}
 }
+# 1 + 2 + 4 + 8 + 16 ≈ 31s of patience spread over five tries.
+_TRANSIENT_ATTEMPT_FLOOR = 6
+_MAX_RETRY_BACKOFF_SECONDS = 16.0
+_EMPTY_ANSWER_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -198,6 +203,7 @@ def chat_messages(
     client = _get_client(runtime)
     attempts = _chat_attempt_count(runtime, max_attempts)
     last_transient: Exception | None = None
+    empty_final_answers = 0
     timeout = _text_timeout_seconds(task=TASK_PLANNING, override=timeout_seconds)
 
     extra: dict[str, Any] = {}
@@ -206,18 +212,22 @@ def chat_messages(
         extra["tool_choice"] = "auto"
     if response_format:
         extra["response_format"] = response_format
-    call_details = _chat_call_details(
-        stage=stage,
-        messages=messages,
-        tools=tools,
-        temperature=temperature,
-        max_completion_tokens=max_completion_tokens,
-        timeout_seconds=timeout,
-        attempts=attempts,
-        runtime=runtime,
-        response_format=response_format,
-        thinking_enabled=thinking_enabled,
-    )
+
+    def build_call_details() -> dict[str, Any]:
+        return _chat_call_details(
+            stage=stage,
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_completion_tokens=max_completion_tokens,
+            timeout_seconds=timeout,
+            attempts=attempts,
+            runtime=runtime,
+            response_format=response_format,
+            thinking_enabled=thinking_enabled,
+        )
+
+    call_details = build_call_details()
 
     for attempt in range(attempts):
         request_id = str(uuid.uuid4())
@@ -310,6 +320,43 @@ def chat_messages(
             for tc in raw_tool_calls
             if getattr(tc, "function", None) is not None
         ]
+        # A round that was asked for a final answer but returned neither content
+        # nor tool calls is a provider anomaly, not an answer: DeepSeek can spend
+        # the whole completion budget on reasoning tokens and then stop with
+        # finish_reason=stop and an empty message. Retrying without thinking
+        # turns that dead round into an answer instead of failing the request.
+        if not tools and not tool_calls and not (message.content or "").strip():
+            empty_final_answers += 1
+            # An empty round burnt a full generation, so this budget stays small
+            # even though transient errors get many cheap tries: one retry with
+            # thinking off either works or the stage should fail out loud.
+            remaining = min(
+                attempts - attempt - 1,
+                _EMPTY_ANSWER_RETRIES - empty_final_answers + 1,
+            )
+            log_event(
+                "model_chat",
+                status="retry" if remaining else "failed",
+                request_id=request_id,
+                attempt=attempt + 1,
+                attempts=attempts,
+                reason="empty_final_content",
+                finish_reason=getattr(resp.choices[0], "finish_reason", None),
+                reasoning_content_chars=len(
+                    getattr(message, "reasoning_content", None) or ""
+                ),
+                retry_without_thinking=bool(remaining),
+                **call_details,
+                **_usage_details(resp),
+            )
+            if remaining:
+                thinking_enabled = False
+                call_details = build_call_details()
+                _sleep_before_retry(attempt, attempts)
+                continue
+            # Out of attempts: hand the empty turn back so the caller can raise
+            # the error that fits its own stage (repair keeps its problem list).
+
         logger.info(
             "model chat ok (fc) request_id=%s latency_ms=%d tool_calls=%d",
             request_id, latency_ms, len(tool_calls),
@@ -371,6 +418,7 @@ def chat_messages(
         status="failed",
         reason="exhausted_retries",
         last_error=type(last_transient).__name__ if last_transient else None,
+        empty_final_answers=empty_final_answers,
         **call_details,
         **(_api_error_details(last_transient) if last_transient else {}),
     )
@@ -661,7 +709,12 @@ def _chat_attempt_count(
     if override is not None:
         return max(1, override)
     configured = max(1, settings.VIVO_MAX_RETRY + 1)
-    return max(3, configured) if runtime.provider == "deepseek" else configured
+    # A run spends 3–5 minutes across a dozen model calls, so a blip in any one
+    # of them throws away every earlier round. Three attempts inside a 3-second
+    # window is not enough to ride out a short DNS/TLS hiccup.
+    if runtime.provider == "deepseek":
+        return max(_TRANSIENT_ATTEMPT_FLOOR, configured)
+    return configured
 
 
 def _runtime_log_details(
@@ -817,11 +870,20 @@ def _bounded_text(value: Any, limit: int) -> str | None:
 
 
 def _sleep_before_retry(attempt: int, attempts: int) -> None:
+    """Back off exponentially, with jitter, and never past the cap.
+
+    Linear 1s/2s steps only cover ~3 seconds, which is shorter than the typical
+    network wobble; doubling reaches ~30s of total patience while still failing
+    fast on a genuinely dead endpoint. The jitter keeps concurrent planning runs
+    from retrying in lockstep.
+    """
     if attempt + 1 >= attempts:
         return
-    delay = max(0.0, settings.VIVO_RETRY_BACKOFF_SECONDS) * (attempt + 1)
-    if delay:
-        time.sleep(delay)
+    base = max(0.0, settings.VIVO_RETRY_BACKOFF_SECONDS)
+    if not base:
+        return
+    delay = min(base * (2**attempt), _MAX_RETRY_BACKOFF_SECONDS)
+    time.sleep(delay * random.uniform(0.8, 1.2))
 
 
 def _extract_content(resp: Any) -> str:

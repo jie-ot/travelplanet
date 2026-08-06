@@ -216,6 +216,10 @@ class PlanningBrief(CamelModel):
     constraints: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     summary: str = ""
+    # Free-form leftovers the structured fields cannot carry: city order,
+    # morning/evening windows, party constraints, must-sees, etc. Shown on the
+    # confirmation checklist and re-injected verbatim into generation.
+    detail_requirements: str = ""
 
     @field_validator(
         "destinations", "interests", "constraints", "assumptions", mode="before"
@@ -225,7 +229,7 @@ class PlanningBrief(CamelModel):
         """Model-facing compatibility: JSON null means no accumulated items."""
         return [] if value is None else value
 
-    @field_validator("summary", mode="before")
+    @field_validator("summary", "detail_requirements", mode="before")
     @classmethod
     def normalize_nullable_summary(cls, value):  # noqa: ANN001, ANN206
         return "" if value is None else value
@@ -248,6 +252,9 @@ class PlanningRequest(CamelModel):
     messages: list[PlanningChatMessage] = Field(default_factory=list)
     brief: PlanningBrief | None = None
     confirmed: bool = False
+    # Client-generated, optional. When present the backend publishes stage
+    # progress the client can poll while this request is still in flight.
+    progress_token: str | None = Field(default=None, max_length=64)
 
 
 class PlanningResponse(CamelModel):

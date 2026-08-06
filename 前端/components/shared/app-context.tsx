@@ -107,6 +107,15 @@ const UPLOAD_MAX_RETRY = 2
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 /**
+ * 生成一次规划请求的进度令牌。
+ * 后端只接受 [A-Za-z0-9_-]，且长度不超过 64；随机段用于区分并发请求。
+ */
+function newProgressToken(): string {
+  const random = Math.random().toString(36).slice(2, 10)
+  return `plan-${Date.now().toString(36)}-${random}`
+}
+
+/**
  * 上传单张：读 EXIF（内部已容错，不抛错）后上传，失败按线性退避重试。
  * 仅对 AppError(1003)（网络/服务抖动等可恢复错误）重试；1002 等参数类错误立即失败，重试无意义。
  */
@@ -176,6 +185,8 @@ interface AppContextValue {
   editingPlanId: string | null
   hasUnsavedDraft: boolean
   planning: boolean
+  /** 当前（或最近一次）规划请求的进度令牌，供待机动画轮询真实进度。 */
+  planningProgressToken: string | null
   planningTurn: (input: PlanWithAIInput) => Promise<PlanningResponse | null>
   planRefine: (message: string, planningModel: PlanningModel) => Promise<ItineraryData | null>
   beginNewPlan: () => void
@@ -215,6 +226,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [editingPlanId, setEditingPlanId] = useState<string | null>(null)
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState(false)
   const [planning, setPlanning] = useState(false)
+  const [planningProgressToken, setPlanningProgressToken] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [initLoading, setInitLoading] = useState(true)
@@ -497,11 +509,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   /* ---------------- 旅行规划对话流程（规范 2.3 / §10） ---------------- */
   // 需求澄清与确认共用一个入口；只有 completed 响应才写入行程草稿。
+  // 每一轮都自带进度令牌：POST 仍是单次阻塞请求，待机动画另起轮询读取真实阶段。
   const planningTurn = useCallback(
     async (input: PlanWithAIInput): Promise<PlanningResponse | null> => {
+      const token = input.progressToken ?? newProgressToken()
+      setPlanningProgressToken(token)
       setPlanning(true)
       try {
-        const response = await planWithAI(input)
+        const response = await planWithAI({ ...input, progressToken: token })
         if (response.itinerary) {
           setDraftItineraryData(response.itinerary)
           if (!input.context) setEditingPlanId(null)
@@ -608,6 +623,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       editingPlanId,
       hasUnsavedDraft,
       planning,
+      planningProgressToken,
       planningTurn,
       planRefine,
       beginNewPlan,
@@ -646,6 +662,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       editingPlanId,
       hasUnsavedDraft,
       planning,
+      planningProgressToken,
       planningTurn,
       planRefine,
       beginNewPlan,

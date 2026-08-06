@@ -27,6 +27,24 @@ def normalize_brief(brief: PlanningBrief) -> PlanningBrief:
     brief.constraints = _clean_list(brief.constraints)
     brief.assumptions = _clean_list(brief.assumptions)
     brief.summary = brief.summary.strip()
+    brief.detail_requirements = (brief.detail_requirements or "").strip()
+    return brief
+
+
+def finalize_brief(
+    brief: PlanningBrief,
+    *,
+    user_messages: list[str] | None = None,
+) -> PlanningBrief:
+    """Normalize and keep detail_requirements as the model wrote it.
+
+    ``user_messages`` is accepted for call-site compatibility but no longer
+    concatenated into the field — stuffing chat turns and assumptions produced
+    the unreadable checklist blobs users rejected.
+    """
+    del user_messages  # intentionally unused
+    brief = normalize_brief(brief)
+    brief.detail_requirements = compose_detail_requirements(brief)
     return brief
 
 
@@ -59,7 +77,9 @@ def build_checklist(brief: PlanningBrief) -> list[PlanningChecklistItem]:
         if brief.start_date and brief.end_date
         else "还需要确认"
     )
-    return [
+    detail = compose_detail_requirements(brief)
+    has_detail = detail != "无"
+    items = [
         _item("origin", "从哪里出发", brief.origin, required=True),
         _item("destinations", "去哪里", destinations, required=True),
         _item("dates", "出行日期", dates if dates != "还需要确认" else None, required=True),
@@ -84,14 +104,29 @@ def build_checklist(brief: PlanningBrief) -> list[PlanningChecklistItem]:
             required=False,
             assumed=not brief.interests,
         ),
+        # Always last: model-authored leftovers only — never chat dumps.
+        _item(
+            "detailRequirements",
+            "详细需求",
+            detail,
+            required=False,
+            assumed=not has_detail,
+        ),
     ]
+    return items
 
 
 def confirmed_requirement_text(brief: PlanningBrief, latest_message: str) -> str:
-    """Create a compact, authoritative requirement block for itinerary research."""
+    """Create a compact, authoritative requirement block for itinerary research.
+
+    The confirmation checklist — including detail_requirements — is the source of
+    truth for generation. Chat history is not replayed into research, so any
+    morning/evening window or city order that is not on this block is gone.
+    """
+    detail = compose_detail_requirements(brief)
     return "\n".join(
         [
-            "用户已经确认以下旅行需求，请据此研究并生成完整行程：",
+            "【确认清单】用户已经确认以下旅行需求，请据此研究并生成完整行程：",
             f"- 出发地：{brief.origin}",
             f"- 目的地：{'、'.join(brief.destinations)}",
             f"- 日期：{brief.start_date} 至 {brief.end_date}",
@@ -103,9 +138,23 @@ def confirmed_requirement_text(brief: PlanningBrief, latest_message: str) -> str
             f"- 兴趣：{'、'.join(brief.interests) or '经典体验与舒适节奏'}",
             f"- 约束：{'；'.join(brief.constraints) or '无额外约束'}",
             f"- 已确认假设：{'；'.join(brief.assumptions) or '无'}",
+            f"- 详细需求：{detail}",
             f"- 用户确认语：{latest_message.strip()}",
         ]
     )
+
+
+def compose_detail_requirements(brief: PlanningBrief) -> str:
+    """Return the checklist「详细需求」value.
+
+    Use the intake model's field as-is when it wrote something real. Do not
+    append assumptions, budgets, or raw chat turns — that produced duplicated
+    walls of text. If the model left it blank, show「无».
+    """
+    cleaned = (brief.detail_requirements or "").strip()
+    if not cleaned or cleaned.lower() in _NULL_TEXT or cleaned in {"无", "无额外说明", "暂无额外说明"}:
+        return "无"
+    return cleaned
 
 
 def _clean_optional(value: str | None) -> str | None:

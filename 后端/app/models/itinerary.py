@@ -132,3 +132,8 @@ class ItineraryData(BaseModel):
     food_recommendations: list[str]
     itinerary: list[DailyItinerary]
     experience_summary: ExperienceSummary | None = None
+    # Filled by the feasibility gate, never by the model: findings that survive
+    # repair but belong to a whole day or to the booking list have no schedule row
+    # to carry a caveat, and shipping them silently is how a plan that contradicts
+    # the request reaches the traveller looking fully verified.
+    advisories: list[str] = Field(default_factory=list)

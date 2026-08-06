@@ -12,6 +12,7 @@ import {
   Navigation,
   Route,
   Ticket,
+  TriangleAlert,
   Utensils,
   X,
 } from "lucide-react"
@@ -38,7 +39,7 @@ function destinationMood(destination: string) {
 
 export function ItineraryDetail({ data }: { data: ItineraryData }) {
   const { registerBackHandler, toast } = useApp()
-  const { trip_info, preparations, bookings, food_recommendations, itinerary } = data
+  const { trip_info, preparations, bookings, food_recommendations, itinerary, advisories } = data
   const [activeDay, setActiveDay] = useState(itinerary[0]?.id ?? "")
   const [expandedSchedules, setExpandedSchedules] = useState<Set<string>>(() => new Set())
   const [bookingOpen, setBookingOpen] = useState(false)
@@ -108,6 +109,20 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
           </p>
         </div>
       </header>
+
+      {advisories && advisories.length > 0 ? (
+        <aside className="itinerary-advisories" role="status">
+          <p className="itinerary-advisories-title">
+            <TriangleAlert className="size-3.5" aria-hidden />
+            出行前请核对
+          </p>
+          <ul>
+            {advisories.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </aside>
+      ) : null}
 
       {(preparations.length > 0 ||
         bookings.length > 0 ||
@@ -556,6 +571,14 @@ function ScheduleCard({
             <span>
               <Navigation className="size-3" aria-hidden />
               通勤 {schedule.travel_minutes} 分钟
+            </span>
+          ) : null}
+          {/* 后端核对未通过的那几条会标成 unverified。这个提示不能藏在“展开详情”
+              里——按错的时刻去买票，是看不到才会犯的错。 */}
+          {schedule.fact_status === "unverified" ? (
+            <span className="itinerary-unconfirmed">
+              <TriangleAlert className="size-3" aria-hidden />
+              时刻待确认
             </span>
           ) : null}
         </div>
