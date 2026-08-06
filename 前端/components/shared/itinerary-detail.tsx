@@ -524,8 +524,6 @@ function ScheduleCard({
 }) {
   const hasDetails = Boolean(
     schedule.transport ||
-      schedule.note ||
-      schedule.duration_minutes ||
       schedule.distance_km ||
       schedule.booking_required,
   )
@@ -605,15 +603,12 @@ function ScheduleCard({
                 {schedule.transport}
               </p>
             )}
-            {(schedule.distance_km || schedule.duration_minutes) && (
+            {schedule.distance_km ? (
               <p>
                 <Footprints className="size-4" aria-hidden />
-                {schedule.distance_km ? `${schedule.distance_km} 公里` : ""}
-                {schedule.distance_km && schedule.duration_minutes ? " · " : ""}
-                {schedule.duration_minutes ? `建议停留 ${schedule.duration_minutes} 分钟` : ""}
+                {`${schedule.distance_km} 公里`}
               </p>
-            )}
-            {schedule.note && <p className="itinerary-note">{schedule.note}</p>}
+            ) : null}
           </div>
         )}
 

@@ -39,7 +39,7 @@ def build_planning_user_text(
         rails = fact_pack.get("rails") or []
         if rails:
             rail_rule = (
-                "仅当 Function Calling 返回 rails 且 status=ok 时：可在 bookings/note 中引用其参考车次、"
+                "仅当 Function Calling 返回 rails 且 status=ok 时：可在 bookings 中引用其参考车次、"
                 "时刻、参考票价，但每条都必须显式附“以 12306 官方实时为准，票价余票请"
                 "官方渠道确认”；严禁超出工具字段编造其它车次。"
             )

@@ -504,7 +504,6 @@ def _summarize_itinerary(data: ItineraryData) -> dict[str, Any]:
                             in {
                                 "place_name",
                                 "location",
-                                "duration_minutes",
                                 "travel_minutes",
                                 "distance_km",
                                 "transport_mode",

@@ -25,9 +25,19 @@ class Preparation(BaseModel):
     items: str
 
 
+ALLOWED_BOOKING_TYPES = frozenset({"机票", "火车票", "酒店", "景区门票"})
+
+
 class Booking(BaseModel):
     type: str
     details: str
+
+    @field_validator("type")
+    @classmethod
+    def normalize_booking_type(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 class ScheduleAction(BaseModel):
@@ -42,10 +52,8 @@ class Schedule(BaseModel):
     end_time: str | None = None
     activity: str
     transport: str | None = None
-    note: str | None = None
     place_name: str | None = None
     location: str | None = None
-    duration_minutes: int | None = None
     travel_minutes: int | None = None
     distance_km: float | None = None
     transport_mode: Literal["driving", "transit", "walking", "bicycling"] | None = None
@@ -137,3 +145,9 @@ class ItineraryData(BaseModel):
     # to carry a caveat, and shipping them silently is how a plan that contradicts
     # the request reaches the traveller looking fully verified.
     advisories: list[str] = Field(default_factory=list)
+
+    @field_validator("bookings", mode="after")
+    @classmethod
+    def keep_allowed_booking_types(cls, value: list[Booking]) -> list[Booking]:
+        """预订指南只保留机票/火车票/酒店/景区门票中真实存在的项。"""
+        return [item for item in value if item.type in ALLOWED_BOOKING_TYPES]

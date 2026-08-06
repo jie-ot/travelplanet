@@ -57,11 +57,14 @@ logger = logging.getLogger("travelplanet")
 
 # Planning function-calling loop bounds (defensive; tool execution is fast and
 # non-blocking, but the model must always converge to a final JSON answer).
-_MAX_TOOL_ROUNDS = 8
-_TARGET_TOOL_ROUNDS = 5
+# Default research budget is 4 rounds; one extension covers critical gaps only.
+_MAX_TOOL_ROUNDS = 5
+_TARGET_TOOL_ROUNDS = 4
+_RESEARCH_REASONING_EFFORT = "low"
 _MAX_TOOL_CALLS_TOTAL = 75
-_MAX_INTAKE_TOOL_ROUNDS = 3
+_MAX_INTAKE_TOOL_ROUNDS = 1
 _MAX_INTAKE_TOOL_CALLS_TOTAL = 8
+_INTAKE_REASONING_EFFORT = "low"
 # A full itinerary is ~12k tokens of JSON and a thinking model spends as much
 # again on reasoning first. At 16k the 2026-08-07 flash run twice hit
 # finish_reason=length with an empty message and had to be retried without
@@ -1136,7 +1139,6 @@ def plan_itinerary(
     path with the baseline fact pack on any function-calling failure.
     """
     planning_progress.report("understanding_request", planning_model=planning_model)
-    system_prompt = _load_planning_system_prompt(planning_model)
     user_text = context_builder.build_planning_user_text(
         message=message,
         context=context,
@@ -1145,17 +1147,32 @@ def plan_itinerary(
     )
     if execute_tool is not None:
         return _plan_with_tools(
-            system_prompt,
             user_text,
             execute_tool,
             planning_model=planning_model,
         )
 
-    return _plan_plain(system_prompt, user_text, planning_model=planning_model)
+    # No-tools fallback synthesizes JSON directly: omit research-only tool rules.
+    return _plan_plain(
+        _load_planning_prompt(planning_model, include_tools=False),
+        user_text,
+        planning_model=planning_model,
+    )
 
 
-def _load_planning_system_prompt(planning_model: PlanningModel) -> str:
-    """Load planning contract and quality skill as one system prompt."""
+def _load_planning_prompt(
+    planning_model: PlanningModel,
+    *,
+    include_tools: bool,
+) -> str:
+    """Assemble planning system prompt for research or final generation.
+
+    Research (`include_tools=True`): contract → tool workflow → skill, plus
+    DeepSeek flight rules when applicable.
+    Generation/repair (`include_tools=False`): contract → skill only (no
+    declare/finish/tool-discipline chapters). DeepSeek daily-map rules stay on
+    both paths because they constrain final JSON fields.
+    """
     current_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
     prompt = (
         f"【当前日期】\n今天是 {current_date}（北京时间）。"
@@ -1163,14 +1180,26 @@ def _load_planning_system_prompt(planning_model: PlanningModel) -> str:
         "需要推断时，推断结果不得早于今天。\n\n"
         "【planning_system.md：必须遵守的契约】\n"
         + load_prompt("planning_system.md")
-        + "\n\n【planning_skill.md：好旅行规划的标准】\n"
+    )
+    if include_tools:
+        # Research order mirrors the former monolith: contract/workflow first,
+        # then quality skill; DeepSeek flight rules remain after skill.
+        prompt += (
+            "\n\n【planning_tools.md：研究阶段工具调用准则】\n"
+            + load_prompt("planning_tools.md")
+        )
+    prompt += (
+        "\n\n【planning_skill.md：好旅行规划的标准】\n"
         + load_prompt("planning_skill.md")
     )
     if planning_model in DEEPSEEK_PLANNING_MODELS:
+        if include_tools:
+            prompt += (
+                "\n\n【DeepSeek 专属航班工具规则】\n"
+                + load_prompt("planning_flight_tools_deepseek.md")
+            )
         prompt += (
-            "\n\n【DeepSeek 专属航班工具规则】\n"
-            + load_prompt("planning_flight_tools_deepseek.md")
-            + "\n\n【DeepSeek 专属每日游玩地图标注】\n"
+            "\n\n【DeepSeek 专属每日游玩地图标注】\n"
             + load_prompt("planning_daily_map_deepseek.md")
         )
     return prompt
@@ -1350,15 +1379,16 @@ def _ensure_confirmation_checklist_preserved(
 
 
 def _plan_with_tools(
-    system_prompt: str,
     user_text: str,
     execute_tool: ToolExecutor,
     *,
     planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
 ) -> ItineraryData:
     """Research protocol: declare scope → gather/select facts → finish → final + audit."""
+    research_prompt = _load_planning_prompt(planning_model, include_tools=True)
+    generation_prompt = _load_planning_prompt(planning_model, include_tools=False)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": research_prompt},
         {"role": "user", "content": user_text},
     ]
     scope: dict[str, Any] | None = None
@@ -1442,6 +1472,7 @@ def _plan_with_tools(
             stage="planning_research",
             max_completion_tokens=_MAX_GENERATION_TOKENS,
             planning_model=planning_model,
+            reasoning_effort=_RESEARCH_REASONING_EFFORT,
         )
         log_event(
             "planning_tool_round_result",
@@ -1508,6 +1539,8 @@ def _plan_with_tools(
             for result in parallel_results.values()
         )
         called_names: list[str] = []
+        turn_issued_fact_count = 0
+        fact_state_updated = False
         for call_index, (tc, args) in enumerate(parsed_calls, start=1):
             called_names.append(tc.name)
             tool_kind = _planning_tool_kind(tc.name, allowed_external_tool_names)
@@ -1569,6 +1602,7 @@ def _plan_with_tools(
                             planning_model=planning_model,
                         )
                     _ensure_confirmation_checklist_preserved(messages, user_text)
+                    fact_state_updated = True
                     result = {
                         "tool": tc.name,
                         "status": "ok" if not unknown_ids else "partial",
@@ -1661,6 +1695,7 @@ def _plan_with_tools(
                 }
 
             issued_fact_ids = sorted(set(fact_registry) - fact_ids_before)
+            turn_issued_fact_count += len(issued_fact_ids)
             log_event(
                 "planning_execute_tool",
                 status=str(result.get("status") or "unknown"),
@@ -1723,8 +1758,11 @@ def _plan_with_tools(
                         "role": "user",
                         "content": (
                             f"默认 {target_rounds} 轮研究已完成，但以下关键事实仍缺失，"
-                            f"因此允许延长到 {max_rounds} 轮：{'; '.join(critical_gaps)}。"
-                            "请只补查这些关键缺口，完成后立即调用 finish_research。"
+                            f"因此允许再补充 1 轮到共 {max_rounds} 轮："
+                            f"{'; '.join(critical_gaps)}。"
+                            "请只补查这些关键缺口；读完结果后调用 "
+                            "update_planning_fact_state 只保留会用到的事实，"
+                            "然后立即调用 finish_research。"
                         ),
                     }
                 )
@@ -1735,16 +1773,37 @@ def _plan_with_tools(
                     else "target_rounds_complete"
                 )
         remaining_rounds = active_round_limit - round_idx - 1
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"本轮已调用：{', '.join(called_names)}。"
-                    f"还剩 {remaining_rounds} 个研究轮次，已执行 {external_calls} 次外部调用。"
-                    "继续用 remainingQueries 驱动查询；不要提前输出最终行程。"
-                ),
-            }
-        )
+        if turn_issued_fact_count > 0 and not fact_state_updated:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"本轮已调用：{', '.join(called_names)}，"
+                        f"新产生 {turn_issued_fact_count} 条事实。"
+                        "请立即调用 update_planning_fact_state，"
+                        "用 selectedFactIds 只保留后续行程会用到的事实，"
+                        "不要保留明显不会采用的候选；未选中的结果会从上下文删除。"
+                        "信息已够时可在同一轮再调用 finish_research；"
+                        f"否则继续并行补查。还剩 {remaining_rounds} 个研究轮次，"
+                        f"已执行 {external_calls} 次外部调用。"
+                        "默认目标是 4 轮，够了就结束，不要为凑轮次继续查。"
+                    ),
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"本轮已调用：{', '.join(called_names)}。"
+                        f"还剩 {remaining_rounds} 个研究轮次，已执行 {external_calls} 次外部调用。"
+                        "互不依赖的查询尽量同轮并行；"
+                        "读完新事实后用 update_planning_fact_state 只保留会用到的，"
+                        "丢弃不会采用的候选。关键事实齐全就调用 finish_research，"
+                        "不要为凑满轮次继续查询。"
+                    ),
+                }
+            )
 
     if scope is None:
         raise AIGenerationError("行程规划生成失败：模型未声明旅行范围")
@@ -1788,7 +1847,7 @@ def _plan_with_tools(
         detail=f"依据 {len(retained_facts)} 条事实编排行程",
     )
     final_data = _generate_itinerary_from_research(
-        system_prompt=system_prompt,
+        system_prompt=generation_prompt,
         user_text=user_text,
         scope=scope,
         retained_facts=retained_facts,
@@ -1803,7 +1862,7 @@ def _plan_with_tools(
     # was removed rather than kept as the single largest cost in the pipeline.
     planning_progress.report("verifying")
     return _repair_itinerary_violations(
-        system_prompt=system_prompt,
+        system_prompt=generation_prompt,
         user_text=user_text,
         itinerary=final_data,
         retained_facts=retained_facts,
@@ -1825,7 +1884,6 @@ def collect_planning_requirements(
         f"【当前日期】\n今天是 {current_date}（北京时间）。\n\n"
         + load_prompt("planning_intake_system.md")
     )
-    deepseek_fast_intake = planning_model in DEEPSEEK_PLANNING_MODELS
     bounded_messages = [
         {
             "role": message.role,
@@ -1846,76 +1904,6 @@ def collect_planning_requirements(
         },
         ensure_ascii=False,
     )
-    if deepseek_fast_intake:
-        compact_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"{user_text}\n\n本阶段只抽取和确认旅行需求，不调用外部工具。"
-                    "必须输出完整 PlanningIntakeResult JSON，包含 assistantMessage 和 "
-                    "brief；未知字段使用 null 或空数组。"
-                ),
-            },
-        ]
-        with timed_stage(
-            "planning_intake_model",
-            conversation_turns=len(bounded_messages),
-            has_previous_brief=previous_brief is not None,
-            tools_enabled=False,
-            fast_path=True,
-            planning_model=planning_model,
-        ):
-            turn = vivo_chat_client.chat_messages(
-                messages=compact_messages,
-                tools=None,
-                stage="planning_intake_compact",
-                temperature=0.0,
-                max_completion_tokens=4000,
-                planning_model=planning_model,
-                response_format={"type": "json_object"},
-                thinking_enabled=False,
-            )
-            if not turn.content:
-                raise AIGenerationError("旅行需求沟通失败：模型未返回内容")
-            try:
-                return output_parser.parse_model_json(
-                    turn.content,
-                    PlanningIntakeResult,
-                )
-            except AIGenerationError as exc:
-                error_detail = _model_output_error_detail(exc, turn.content)
-                compact_messages.extend(
-                    [
-                        _assistant_history_message(turn, planning_model),
-                        {
-                            "role": "user",
-                            "content": (
-                                "只修复 PlanningIntakeResult 结构；必须同时包含 "
-                                "assistantMessage 和完整 brief。未知值用 null 或空数组。"
-                                f"\n【错误诊断】{error_detail}"
-                            ),
-                        },
-                    ]
-                )
-                repaired = vivo_chat_client.chat_messages(
-                    messages=compact_messages,
-                    tools=None,
-                    stage="planning_intake_compact_repair",
-                    temperature=0.0,
-                    max_completion_tokens=4000,
-                    planning_model=planning_model,
-                    response_format={"type": "json_object"},
-                    thinking_enabled=False,
-                )
-                if not repaired.content:
-                    raise AIGenerationError(
-                        "旅行需求沟通失败：JSON 修复未返回内容"
-                    )
-                return output_parser.parse_model_json(
-                    repaired.content,
-                    PlanningIntakeResult,
-                )
     if execute_tool is None:
         with timed_stage(
             "planning_intake_model",
@@ -1936,7 +1924,13 @@ def collect_planning_requirements(
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_text},
+        {
+            "role": "user",
+            "content": (
+                f"{user_text}\n\n本阶段只抽取和确认旅行需求，可按需并行调用最多 1 轮"
+                "只读旅行工具辅助确认；工具结束后输出完整 PlanningIntakeResult JSON。"
+            ),
+        },
     ]
     intake_tools = tool_specs.planning_intake_tools_for_model(planning_model)
     allowed_intake_tool_names = tool_specs.external_tool_names_for_model(
@@ -1949,6 +1943,7 @@ def collect_planning_requirements(
         conversation_turns=len(bounded_messages),
         has_previous_brief=previous_brief is not None,
         tools_enabled=True,
+        intake_tool_rounds=_MAX_INTAKE_TOOL_ROUNDS,
         planning_model=planning_model,
     ):
         for round_idx in range(_MAX_INTAKE_TOOL_ROUNDS):
@@ -1959,6 +1954,7 @@ def collect_planning_requirements(
                 temperature=0.2,
                 max_completion_tokens=3000,
                 planning_model=planning_model,
+                reasoning_effort=_INTAKE_REASONING_EFFORT,
             )
             if not turn.tool_calls:
                 if not turn.content:
@@ -2000,11 +1996,7 @@ def collect_planning_requirements(
                             if planning_model in DEEPSEEK_PLANNING_MODELS
                             else None
                         ),
-                        thinking_enabled=(
-                            False
-                            if planning_model in DEEPSEEK_PLANNING_MODELS
-                            else None
-                        ),
+                        reasoning_effort=_INTAKE_REASONING_EFFORT,
                     )
                     if repaired.tool_calls or not repaired.content:
                         raise AIGenerationError("旅行需求沟通失败：JSON 修复未返回内容")
@@ -2084,7 +2076,7 @@ def collect_planning_requirements(
             {
                 "role": "user",
                 "content": (
-                    "本轮需求沟通的工具查询已经结束。请结合已有对话和工具结果，"
+                    "本阶段最多 1 轮工具查询已经结束。请结合已有对话和工具结果，"
                     "只输出约定的 PlanningIntakeResult JSON；不要生成每日行程。"
                 ),
             }
@@ -2101,9 +2093,7 @@ def collect_planning_requirements(
                 if planning_model in DEEPSEEK_PLANNING_MODELS
                 else None
             ),
-            thinking_enabled=(
-                False if planning_model in DEEPSEEK_PLANNING_MODELS else None
-            ),
+            reasoning_effort=_INTAKE_REASONING_EFFORT,
         )
     if not final.content:
         raise AIGenerationError("旅行需求沟通失败：模型未返回内容")
@@ -2148,9 +2138,7 @@ def collect_planning_requirements(
                 if planning_model in DEEPSEEK_PLANNING_MODELS
                 else None
             ),
-            thinking_enabled=(
-                False if planning_model in DEEPSEEK_PLANNING_MODELS else None
-            ),
+            reasoning_effort=_INTAKE_REASONING_EFFORT,
         )
         if not repaired.content:
             raise AIGenerationError("旅行需求沟通失败：JSON 修复未返回内容")
@@ -2815,7 +2803,7 @@ def _request_itinerary_repair(
                     "只修复列出的问题，不要重写无关内容：跨城交通必须单独成条，"
                     "start_time/end_time 必须直接取自所引班次事实的真实起降时刻；"
                     "distance_km/travel_minutes 必须等于所引 amap_route 事实的值，"
-                    "没有对应路线事实时置为 null 并在 note 写明需以地图实时为准；"
+                    "没有对应路线事实时置为 null 并在 transport 写明需以地图实时为准；"
                     "不得写未查到的航班号或车次号；保留其余行程、fact_refs 和地图语义字段，"
                     "消除时间重叠。不得调用工具，只输出完整 ItineraryData JSON。\n"
                     f"【用户需求】{user_text[:4000]}\n"

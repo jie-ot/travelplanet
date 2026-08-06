@@ -97,7 +97,7 @@ def _schedule_text(schedule: Schedule) -> str:
     """
     return " ".join(
         part
-        for part in (schedule.activity, schedule.transport, schedule.note)
+        for part in (schedule.activity, schedule.transport)
         if part
     )
 
@@ -258,9 +258,13 @@ def annotate_unresolved(
             if (day.date, schedule.id) not in flagged:
                 continue
             schedule.fact_status = "unverified"
-            note = (schedule.note or "").strip()
-            if UNCONFIRMED_NOTE not in note:
-                schedule.note = f"{note}（{UNCONFIRMED_NOTE}）" if note else UNCONFIRMED_NOTE
+            activity = (schedule.activity or "").strip()
+            if UNCONFIRMED_NOTE not in activity:
+                schedule.activity = (
+                    f"{activity}（{UNCONFIRMED_NOTE}）"
+                    if activity
+                    else UNCONFIRMED_NOTE
+                )
             applied.append(f"{day.date} {schedule.id} 已标注为时刻待确认")
     for date in dates:
         advisory = _DAY_ADVISORY.format(date=date)
@@ -393,10 +397,12 @@ def _autofix_route_numbers(
 def _clear_route_numbers(label: str, schedule: Schedule, reason: str) -> str:
     schedule.distance_km = None
     schedule.travel_minutes = None
-    note = (schedule.note or "").strip()
-    if _UNBACKED_DISTANCE_NOTE not in note:
-        schedule.note = (
-            f"{note}（{_UNBACKED_DISTANCE_NOTE}）" if note else _UNBACKED_DISTANCE_NOTE
+    transport = (schedule.transport or "").strip()
+    if _UNBACKED_DISTANCE_NOTE not in transport:
+        schedule.transport = (
+            f"{transport}（{_UNBACKED_DISTANCE_NOTE}）"
+            if transport
+            else _UNBACKED_DISTANCE_NOTE
         )
     return f"{label} {reason}，已清空 distance_km/travel_minutes 并注明以地图为准"
 

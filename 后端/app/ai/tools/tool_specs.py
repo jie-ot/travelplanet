@@ -656,8 +656,9 @@ PLANNING_FACT_STATE_TOOL: dict = {
     "function": {
         "name": TOOL_UPDATE_PLANNING_FACT_STATE,
         "description": (
-            "从已返回结果中选择后续生成行程需要保留的 fact_id，并列出还需要执行的具体查询。"
-            "后端会按 ID 完整保留事实；此工具不访问外部服务，也不占外部调用预算。"
+            "读完本轮外部工具结果后必须调用：用 selectedFactIds 只保留后续行程会用到的事实，"
+            "未选中的候选会从上下文删除。不要保留明显不会采用的结果。"
+            "此工具不访问外部服务，也不占外部调用预算；可与 finish_research 同轮。"
         ),
         "parameters": {
             "type": "object",

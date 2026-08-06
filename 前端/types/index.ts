@@ -252,7 +252,7 @@ export interface Preparation {
 }
 
 export interface Booking {
-  type: string
+  type: "机票" | "火车票" | "酒店" | "景区门票" | string
   details: string
 }
 
@@ -295,10 +295,8 @@ export interface Schedule {
   end_time?: string | null
   activity: string
   transport?: string | null
-  note?: string | null
   place_name?: string | null
   location?: string | null
-  duration_minutes?: number | null
   travel_minutes?: number | null
   distance_km?: number | null
   transport_mode?: "driving" | "transit" | "walking" | "bicycling" | null

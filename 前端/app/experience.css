@@ -511,7 +511,6 @@
 .itinerary-card-details { display: flex; flex-direction: column; gap: .55rem; margin-top: .75rem; padding-top: .75rem; border-top: 1px solid rgb(10 56 80 / .08); animation: materialize-in .25s both; }
 .itinerary-card-details p { display: flex; align-items: flex-start; gap: .45rem; color: #536d79; font-size: .84rem; line-height: 1.55; }
 .itinerary-card-details svg { flex: none; margin-top: .1rem; color: #078fab; }
-.itinerary-card-details .itinerary-note { padding: .6rem; color: #4d6570; border-radius: .75rem; background: #eef1eb; }
 .itinerary-card-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .8rem; }
 .itinerary-card-actions a, .itinerary-card-actions button { display: inline-flex; min-height: 2.1rem; align-items: center; gap: .3rem; padding: .35rem .62rem; color: #456570; font-size: .72rem; font-weight: 700; border: 1px solid rgb(10 56 80 / .09); border-radius: .65rem; background: white; }
 .itinerary-card-actions a { color: #087f98; text-decoration: none; }

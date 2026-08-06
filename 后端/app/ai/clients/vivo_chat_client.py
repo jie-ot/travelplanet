@@ -181,6 +181,7 @@ def chat_messages(
     planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
     response_format: dict[str, str] | None = None,
     thinking_enabled: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> ChatTurn:
     """Run ONE real model round over a caller-managed `messages` list.
 
@@ -225,6 +226,7 @@ def chat_messages(
             runtime=runtime,
             response_format=response_format,
             thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
         )
 
     call_details = build_call_details()
@@ -251,6 +253,7 @@ def chat_messages(
                 request_id=request_id,
                 extra=extra,
                 thinking_enabled=thinking_enabled,
+                reasoning_effort=reasoning_effort,
             )
             resp = client.chat.completions.create(**request_kwargs)
         except (AuthenticationError, PermissionDeniedError) as exc:
@@ -670,6 +673,7 @@ def _chat_call_details(
     runtime: ChatRuntime,
     response_format: dict[str, str] | None = None,
     thinking_enabled: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     role_counts: dict[str, int] = {}
     content_chars = 0
@@ -688,7 +692,11 @@ def _chat_call_details(
             tool_names.append(str(function["name"]))
     return {
         "stage": stage,
-        **_runtime_log_details(runtime, thinking_enabled=thinking_enabled),
+        **_runtime_log_details(
+            runtime,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+        ),
         "message_count": len(messages),
         "message_role_counts": role_counts,
         "message_content_chars": content_chars,
@@ -718,16 +726,24 @@ def _chat_attempt_count(
 
 
 def _runtime_log_details(
-    runtime: ChatRuntime, *, thinking_enabled: bool | None = None
+    runtime: ChatRuntime,
+    *,
+    thinking_enabled: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     effective_thinking = True if thinking_enabled is None else thinking_enabled
+    effective_effort = (
+        None
+        if not effective_thinking
+        else (reasoning_effort or runtime.reasoning_effort)
+    )
     return {
         "planning_model": runtime.planning_model,
         "provider": runtime.provider,
         "model": runtime.api_model,
         "base_url_host": runtime.base_url.split("//", 1)[-1].split("/", 1)[0],
         "thinking_enabled": effective_thinking,
-        "reasoning_effort": runtime.reasoning_effort if effective_thinking else None,
+        "reasoning_effort": effective_effort,
         "token_parameter": runtime.token_parameter,
         "temperature_sent": runtime.uses_temperature,
     }
@@ -743,6 +759,7 @@ def _completion_request_kwargs(
     request_id: str,
     extra: dict[str, Any] | None = None,
     thinking_enabled: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Build provider-specific OpenAI SDK kwargs without leaking credentials."""
     effective_thinking = True if thinking_enabled is None else thinking_enabled
@@ -760,7 +777,7 @@ def _completion_request_kwargs(
         **(extra or {}),
     }
     if effective_thinking:
-        kwargs["reasoning_effort"] = runtime.reasoning_effort
+        kwargs["reasoning_effort"] = reasoning_effort or runtime.reasoning_effort
     kwargs[runtime.token_parameter] = max_completion_tokens
     if runtime.uses_temperature:
         kwargs["temperature"] = temperature
