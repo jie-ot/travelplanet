@@ -16,7 +16,6 @@ import {
   Radar,
   Route,
   ShieldCheck,
-  Sparkles,
 } from "lucide-react"
 import type { PlanningProgressPhase, PlanningProgressSnapshot } from "@/types"
 
@@ -32,6 +31,7 @@ const MILESTONES: Array<{
 ]
 
 const FALLBACK_LABEL = "正在准备规划任务"
+const ACTIVITY_LIMIT = 5
 
 function formatDuration(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000))
@@ -90,19 +90,17 @@ export function PlanningProgress({
   const remainingMs = snapshot
     ? Math.max(0, snapshot.estimatedTotalMs - elapsedMs)
     : null
-  const activities = [...(snapshot?.recentActivities ?? [])].reverse().slice(0, 4)
+  const activities = [...(snapshot?.recentActivities ?? [])]
+    .reverse()
+    .slice(0, ACTIVITY_LIMIT)
 
   return (
     <div className="planning-progress" role="status" aria-live="polite">
       <div
         className="planning-progress-dial"
         style={{ "--progress": `${percent}%` } as React.CSSProperties}
+        aria-label={`完成进度 ${Math.round(percent)}%`}
       >
-        <div className="planning-progress-orbit" aria-hidden>
-          <span />
-          <span />
-          <span />
-        </div>
         <div className="planning-progress-readout">
           <strong>{Math.round(percent)}</strong>
           <span>%</span>
@@ -110,7 +108,6 @@ export function PlanningProgress({
       </div>
 
       <div className="planning-progress-copy">
-        <p>AI 正在为你逐项核对</p>
         <h2>{snapshot?.stageLabel ?? FALLBACK_LABEL}</h2>
         <span>
           {snapshot?.detail ??
@@ -119,12 +116,12 @@ export function PlanningProgress({
       </div>
 
       <dl className="planning-progress-stats">
-        <div>
-          <dt>已用</dt>
+        <div className="is-primary">
+          <dt>已用时间</dt>
           <dd>{formatDuration(elapsedMs)}</dd>
         </div>
-        <div>
-          <dt>预计还需</dt>
+        <div className="is-primary">
+          <dt>预计剩余</dt>
           <dd>{formatRemaining(remainingMs)}</dd>
         </div>
         <div>
@@ -137,7 +134,7 @@ export function PlanningProgress({
         </div>
       </dl>
 
-      <ol>
+      <ol className="planning-progress-steps" aria-label="规划阶段">
         {MILESTONES.map((milestone, index) => {
           const Icon = milestone.icon
           const state =
@@ -161,14 +158,17 @@ export function PlanningProgress({
       </ol>
 
       {activities.length > 0 ? (
-        <ul className="planning-progress-activities">
-          {activities.map((activity, index) => (
-            <li key={`${activity}-${index}`} style={{ opacity: 1 - index * 0.22 }}>
-              <Sparkles aria-hidden />
-              {activity}
-            </li>
-          ))}
-        </ul>
+        <div className="planning-progress-activities">
+          <p className="planning-progress-activities-title">实时进程</p>
+          <ul>
+            {activities.map((activity, index) => (
+              <li key={`${activity}-${index}`} style={{ opacity: 1 - index * 0.16 }}>
+                <i aria-hidden />
+                {activity}
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
     </div>
   )

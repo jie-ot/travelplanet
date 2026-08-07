@@ -538,43 +538,42 @@
 .itinerary-food > div:last-child { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .85rem; }
 .itinerary-food > div:last-child span { padding: .5rem .7rem; color: #6f4f44; font-family: var(--font-editorial); font-size: .68rem; border: 1px solid rgb(232 121 85 / .14); border-radius: 999px; background: #f8e9de; }
 
-/* AI exploration progress */
-/* 阶段切换会增删「近期动作」等区块；固定最小高度避免卡片忽长忽短 */
-.planning-progress { position: relative; display: flex; min-height: 34rem; flex-direction: column; align-items: center; overflow: hidden; padding: 2.1rem 1.1rem 1.35rem; color: white; border-radius: 1.6rem; background: radial-gradient(circle at 50% 18%, rgb(74 207 218 / .25), transparent 34%), linear-gradient(160deg, #082d49, #101630 72%); box-shadow: 0 24px 52px -30px rgb(6 45 72 / .9); }
+/* AI exploration progress
+ * 面向 vivo X300 Pro（6.78″ / ~453ppi）等大屏安卓机：按 Material 3 字号
+ * （title≈22sp、body≈14–16sp、label≥12sp）放大可读性，去掉装饰动画，突出真实耗时与轮询进程。 */
+/* 阶段切换会增删「实时进程」等区块；固定最小高度避免卡片忽长忽短 */
+.planning-progress { position: relative; display: flex; min-height: 36rem; flex-direction: column; align-items: center; overflow: hidden; padding: 1.75rem 1.15rem 1.4rem; color: white; border-radius: 1.4rem; background: linear-gradient(165deg, #0b2a42 0%, #111827 100%); box-shadow: 0 18px 40px -28px rgb(6 45 72 / .85); }
 /* 真实完成度：进度环由 --progress 驱动，conic-gradient 的硬边界即当前百分比 */
-.planning-progress-dial { position: relative; display: grid; width: 10.2rem; height: 10.2rem; place-items: center; border-radius: 50%; background: conic-gradient(#73d4df 0 var(--progress, 0%), rgb(178 222 238 / .34) var(--progress, 0%) 100%); box-shadow: 0 0 34px rgb(64 204 216 / .18); transition: background .6s ease; }
-.planning-progress-dial::after { position: absolute; inset: .42rem; content: ''; border-radius: 50%; background: linear-gradient(165deg, #0a3352, #111834); }
-/* 不再画装饰性外环：外圈已经是真实完成度刻度，两个同心环会让读数含义变模糊 */
-.planning-progress-orbit { position: relative; z-index: 1; width: 8.5rem; height: 8.5rem; border-radius: 50%; box-shadow: inset 0 0 40px rgb(64 204 216 / .1); animation: planet-spin 12s linear infinite; }
-.planning-progress-orbit::before { position: absolute; inset: 1.25rem; content: ''; border-radius: 50%; background: radial-gradient(circle at 35% 28%, white, #61d9df 8%, #276dac 43%, #131c49 75%); box-shadow: 0 0 28px rgb(82 221 225 / .42); animation: sphere-float 4s ease-in-out infinite; }
-.planning-progress-orbit span { position: absolute; width: .42rem; height: .42rem; border-radius: 50%; background: white; box-shadow: 0 0 10px #61d9df; }
-.planning-progress-orbit span:nth-child(1) { top: 8%; left: 48%; }
-.planning-progress-orbit span:nth-child(2) { right: 6%; bottom: 28%; }
-.planning-progress-orbit span:nth-child(3) { bottom: 2%; left: 28%; }
-/* 球体高光正好在圆心，读数需要不透明底衬才看得清 */
-.planning-progress-readout { position: absolute; z-index: 2; display: flex; align-items: baseline; gap: .08rem; padding: .34rem .7rem .38rem; border: 1px solid rgb(115 212 223 / .3); border-radius: 999px; background: rgb(5 20 38 / .88); box-shadow: 0 6px 18px -8px rgb(0 0 0 / .7); }
-.planning-progress-readout strong { font-family: var(--font-display); font-size: 1.55rem; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1; }
-.planning-progress-readout span { color: #73d4df; font-size: .72rem; font-weight: 750; }
-.planning-progress-copy { margin-top: 1.3rem; text-align: center; }
-.planning-progress-copy > p { color: #73d4df; font-size: .68rem; font-weight: 750; letter-spacing: .13em; }
-.planning-progress-copy h2 { margin-top: .45rem; font-family: var(--font-display); font-size: 1.22rem; font-weight: 850; }
-.planning-progress-copy > span { display: block; margin-top: .5rem; color: rgb(255 255 255 / .48); font-size: .65rem; line-height: 1.55; }
-.planning-progress-stats { display: grid; width: 100%; grid-template-columns: repeat(4, 1fr); gap: .4rem; margin-top: 1.25rem; }
-.planning-progress-stats > div { padding: .5rem .3rem; text-align: center; border: 1px solid rgb(255 255 255 / .08); border-radius: .8rem; background: rgb(255 255 255 / .05); }
-.planning-progress-stats dt { color: rgb(255 255 255 / .42); font-size: .58rem; font-weight: 700; letter-spacing: .04em; }
-.planning-progress-stats dd { margin-top: .2rem; font-family: var(--font-display); font-size: .82rem; font-weight: 800; font-variant-numeric: tabular-nums; }
-.planning-progress ol { display: flex; width: 100%; flex-direction: column; gap: .2rem; margin-top: 1.1rem; }
-.planning-progress li { display: flex; min-height: 2.65rem; align-items: center; gap: .7rem; padding: .45rem .6rem; color: rgb(255 255 255 / .34); border-radius: .8rem; transition: color .35s, background .35s, transform .35s; }
-.planning-progress li > span { display: grid; width: 1.65rem; height: 1.65rem; flex: none; place-items: center; border: 1px solid rgb(255 255 255 / .12); border-radius: 50%; }
-.planning-progress li svg { width: .8rem; height: .8rem; }
-.planning-progress li p { flex: 1; font-size: .7rem; font-weight: 650; }
-.planning-progress li em { color: #73d4df; font-size: .62rem; font-weight: 750; font-style: normal; font-variant-numeric: tabular-nums; }
-.planning-progress li.is-done { color: rgb(160 230 218 / .66); }
-.planning-progress li.is-active { color: white; background: rgb(255 255 255 / .08); transform: translateX(.25rem); }
-.planning-progress li.is-active > span { color: #062d48; border-color: #73d4df; background: #73d4df; box-shadow: 0 0 16px rgb(115 212 223 / .52); animation: orbit-pulse 2s ease-in-out infinite; }
-.planning-progress-activities { display: flex; width: 100%; flex-direction: column; gap: .3rem; margin-top: 1.05rem; padding-top: .9rem; border-top: 1px solid rgb(255 255 255 / .08); }
-.planning-progress-activities li { display: flex; min-height: 0; align-items: center; gap: .4rem; padding: 0; color: rgb(255 255 255 / .62); font-size: .64rem; line-height: 1.5; border-radius: 0; animation: materialize-in .3s both; }
-.planning-progress-activities svg { width: .68rem; height: .68rem; flex: none; color: #73d4df; }
+.planning-progress-dial { position: relative; display: grid; width: 7.5rem; height: 7.5rem; place-items: center; border-radius: 50%; background: conic-gradient(#73d4df 0 var(--progress, 0%), rgb(255 255 255 / .14) var(--progress, 0%) 100%); transition: background .6s ease; }
+.planning-progress-dial::after { position: absolute; inset: .5rem; content: ''; border-radius: 50%; background: #0f2438; }
+.planning-progress-readout { position: relative; z-index: 1; display: flex; align-items: baseline; gap: .1rem; }
+.planning-progress-readout strong { font-family: var(--font-display); font-size: 2rem; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -.02em; }
+.planning-progress-readout span { color: #73d4df; font-size: .95rem; font-weight: 700; }
+.planning-progress-copy { margin-top: 1.15rem; width: 100%; text-align: center; }
+.planning-progress-copy h2 { font-family: var(--font-display); font-size: 1.25rem; font-weight: 800; line-height: 1.35; }
+.planning-progress-copy > span { display: block; margin-top: .4rem; color: rgb(255 255 255 / .58); font-size: .875rem; line-height: 1.5; }
+/* 2×2：时间指标放大为主信息，查询/事实为辅 */
+.planning-progress-stats { display: grid; width: 100%; grid-template-columns: repeat(2, 1fr); gap: .55rem; margin-top: 1.2rem; }
+.planning-progress-stats > div { padding: .7rem .75rem; text-align: left; border: 1px solid rgb(255 255 255 / .08); border-radius: .75rem; background: rgb(255 255 255 / .045); }
+.planning-progress-stats > div.is-primary { border-color: rgb(115 212 223 / .22); background: rgb(115 212 223 / .08); }
+.planning-progress-stats dt { color: rgb(255 255 255 / .55); font-size: .75rem; font-weight: 650; line-height: 1.3; }
+.planning-progress-stats dd { margin-top: .28rem; font-family: var(--font-display); font-size: 1.2rem; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.planning-progress-stats > div:not(.is-primary) dd { font-size: 1.05rem; }
+.planning-progress-steps { display: flex; width: 100%; flex-direction: column; gap: .25rem; margin-top: 1.15rem; }
+.planning-progress-steps li { display: flex; min-height: 3rem; align-items: center; gap: .75rem; padding: .55rem .7rem; color: rgb(255 255 255 / .38); border-radius: .75rem; transition: color .3s, background .3s; }
+.planning-progress-steps li > span { display: grid; width: 1.85rem; height: 1.85rem; flex: none; place-items: center; border: 1px solid rgb(255 255 255 / .14); border-radius: 50%; }
+.planning-progress-steps li svg { width: .9rem; height: .9rem; }
+.planning-progress-steps li p { flex: 1; font-size: .9rem; font-weight: 650; line-height: 1.3; }
+.planning-progress-steps li em { color: #73d4df; font-size: .8rem; font-weight: 700; font-style: normal; font-variant-numeric: tabular-nums; }
+.planning-progress-steps li.is-done { color: rgb(160 230 218 / .78); }
+.planning-progress-steps li.is-done > span { color: #0b2a42; border-color: rgb(115 212 223 / .55); background: rgb(115 212 223 / .85); }
+.planning-progress-steps li.is-active { color: white; background: rgb(255 255 255 / .09); }
+.planning-progress-steps li.is-active > span { color: #062d48; border-color: #73d4df; background: #73d4df; }
+.planning-progress-activities { display: flex; width: 100%; flex-direction: column; gap: .45rem; margin-top: 1.1rem; padding-top: .95rem; border-top: 1px solid rgb(255 255 255 / .1); }
+.planning-progress-activities-title { color: rgb(255 255 255 / .55); font-size: .75rem; font-weight: 700; letter-spacing: .04em; }
+.planning-progress-activities ul { display: flex; flex-direction: column; gap: .4rem; }
+.planning-progress-activities li { display: flex; min-height: 0; align-items: flex-start; gap: .5rem; padding: 0; color: rgb(255 255 255 / .78); font-size: .8125rem; line-height: 1.45; border-radius: 0; animation: materialize-in .3s both; }
+.planning-progress-activities li > i { display: block; width: .4rem; height: .4rem; flex: none; margin-top: .45rem; border-radius: 50%; background: #73d4df; }
 
 @keyframes persona-drift { to { transform: translate(calc(var(--parallax-x) + 8%), calc(var(--parallax-y) - 4%)) rotate(8deg) scale(1.08); } }
 @keyframes sphere-float { 0%, 100% { translate: 0 0; } 50% { translate: 0 -8px; } }
@@ -599,7 +598,6 @@
 @media (prefers-reduced-motion: reduce) {
   .persona-aurora, .persona-sphere-wrap, .persona-sphere, .persona-orbit, .persona-title-lockup,
   .persona-title-lockup::after, .persona-journal-doodle, .persona-scroll-cue, .persona-keywords span, .persona-reveal,
-  .itinerary-hero-light, .itinerary-stop, .planning-progress-orbit, .planning-progress-orbit::before,
-  .planning-progress-activities li,
-  .planning-progress li.is-active > span { animation: none !important; }
+  .itinerary-hero-light, .itinerary-stop,
+  .planning-progress-activities li { animation: none !important; }
 }
