@@ -59,6 +59,8 @@ export function PlanningView() {
     useState<PlanningModel>(DEFAULT_PLANNING_MODEL)
   const [refinementModelLocked, setRefinementModelLocked] = useState(false)
   const [generationRequested, setGenerationRequested] = useState(false)
+  const [confirmationToken, setConfirmationToken] = useState<string | null>(null)
+  const confirmationInFlight = useRef(false)
   // 未保存草稿返回拦截（规范 §10.5）
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
   const pendingLeave = useRef<(() => void) | null>(null)
@@ -94,6 +96,9 @@ export function PlanningView() {
     setChatMessages(nextMessages)
     setPrompt("")
     setSaved(false)
+    // Any new user requirement invalidates the checklist revision currently on
+    // screen until the backend returns its newly normalized snapshot.
+    setConfirmationToken(null)
     const response = await planningTurn({
       message: text,
       planningModel: selectedModel,
@@ -109,6 +114,7 @@ export function PlanningView() {
     if (!response) return
     setBrief(response.brief)
     setChecklist(response.checklist)
+    setConfirmationToken(response.confirmationToken)
     if (response.phase !== "completed") setConversationPhase(response.phase)
     if (response.assistantMessage) {
       setChatMessages((current) => [
@@ -124,44 +130,51 @@ export function PlanningView() {
   }
 
   async function handleConfirmPlan() {
-    if (!brief || conversationPhase !== "confirming") return
+    if (
+      !brief ||
+      !confirmationToken ||
+      conversationPhase !== "confirming" ||
+      planning ||
+      confirmationInFlight.current
+    ) return
+    confirmationInFlight.current = true
     const confirmationText = "这份确认清单无误，请开始生成行程。"
-    const userMessage: PlanningConversationMessage = {
-      id: `user-confirm-${Date.now()}`,
-      role: "user",
-      content: confirmationText,
-      planningModel: selectedModel,
-    }
-    const nextMessages = [...chatMessages, userMessage]
-    setChatMessages(nextMessages)
     setGenerationRequested(true)
-    const response = await planningTurn({
-      message: confirmationText,
-      planningModel: selectedModel,
-      context: null,
-      messages: nextMessages.map(({ role, content, planningModel }) => ({
-        role,
-        content,
-        planningModel,
-      })),
-      brief,
-      confirmed: true,
-    })
-    setGenerationRequested(false)
-    if (!response || response.itinerary) return
-    setBrief(response.brief)
-    setChecklist(response.checklist)
-    if (response.phase !== "completed") setConversationPhase(response.phase)
-    if (response.assistantMessage) {
-      setChatMessages((current) => [
-        ...current,
-        {
-          id: `assistant-confirm-${Date.now()}`,
-          role: "assistant",
-          content: response.assistantMessage,
-          planningModel: response.planningModel,
-        },
-      ])
+    try {
+      // Confirmation is a state transition, not a magic chat phrase. Keep the
+      // transcript unchanged and bind the request to the exact visible brief.
+      const response = await planningTurn({
+        message: confirmationText,
+        planningModel: selectedModel,
+        context: null,
+        messages: chatMessages.map(({ role, content, planningModel }) => ({
+          role,
+          content,
+          planningModel,
+        })),
+        brief,
+        confirmed: true,
+        confirmationToken,
+      })
+      if (!response || response.itinerary) return
+      setBrief(response.brief)
+      setChecklist(response.checklist)
+      setConfirmationToken(response.confirmationToken)
+      if (response.phase !== "completed") setConversationPhase(response.phase)
+      if (response.assistantMessage) {
+        setChatMessages((current) => [
+          ...current,
+          {
+            id: `assistant-confirm-${Date.now()}`,
+            role: "assistant",
+            content: response.assistantMessage,
+            planningModel: response.planningModel,
+          },
+        ])
+      }
+    } finally {
+      setGenerationRequested(false)
+      confirmationInFlight.current = false
     }
   }
 
@@ -199,6 +212,7 @@ export function PlanningView() {
     setSelectedModel(DEFAULT_PLANNING_MODEL)
     setRefinementModelLocked(false)
     setGenerationRequested(false)
+    setConfirmationToken(null)
   }
 
   function leavePlanning(action: () => void) {
@@ -208,6 +222,7 @@ export function PlanningView() {
     setSaved(false)
     setSelectedModel(DEFAULT_PLANNING_MODEL)
     setRefinementModelLocked(false)
+    setConfirmationToken(null)
     action()
   }
 
@@ -281,6 +296,7 @@ export function PlanningView() {
             busy={planning}
             planningModel={selectedModel}
             modelLocked={conversationModelLocked}
+            confirmationReady={Boolean(confirmationToken)}
             onChange={setPrompt}
             onModelChange={setSelectedModel}
             onSend={() => void handleConversationSend()}

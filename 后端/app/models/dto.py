@@ -252,6 +252,10 @@ class PlanningRequest(CamelModel):
     messages: list[PlanningChatMessage] = Field(default_factory=list)
     brief: PlanningBrief | None = None
     confirmed: bool = False
+    # Stateless digest of the exact normalized brief shown to the user. New
+    # requirement turns receive a new token, so a stale checklist can never
+    # trigger generation after the user has changed the trip requirements.
+    confirmation_token: str | None = Field(default=None, max_length=64)
     # Client-generated, optional. When present the backend publishes stage
     # progress the client can poll while this request is still in flight.
     progress_token: str | None = Field(default=None, max_length=64)
@@ -263,6 +267,7 @@ class PlanningResponse(CamelModel):
     planning_model: PlanningModel
     brief: PlanningBrief | None = None
     checklist: list[PlanningChecklistItem] = Field(default_factory=list)
+    confirmation_token: str | None = None
     itinerary: ItineraryData | None = None
 
 

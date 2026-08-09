@@ -164,6 +164,8 @@ export interface PlanningResponse {
   planningModel: PlanningModel
   brief: PlanningBrief | null
   checklist: PlanningChecklistItem[]
+  /** Digest of the exact brief shown in the confirmation checklist. */
+  confirmationToken: string | null
   itinerary: ItineraryData | null
 }
 

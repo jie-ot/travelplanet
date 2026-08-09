@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 
 from app.models.dto import PlanningBrief, PlanningChecklistItem
 
 _NULL_TEXT = {"", "null", "none", "未知", "未说明", "待确认"}
+_CONFIRMATION_SCHEMA = "planning-brief-v1"
 
 
 def normalize_brief(brief: PlanningBrief) -> PlanningBrief:
@@ -142,6 +145,27 @@ def confirmed_requirement_text(brief: PlanningBrief, latest_message: str) -> str
             f"- 用户确认语：{latest_message.strip()}",
         ]
     )
+
+
+def confirmation_token(brief: PlanningBrief) -> str:
+    """Return a stable digest for the exact confirmation snapshot.
+
+    This is a revision guard, not an authentication credential. Authentication
+    still belongs to the endpoint. Canonical JSON makes the digest independent
+    of dictionary ordering while keeping every user-visible brief field in the
+    revision.
+    """
+    payload = {
+        "schema": _CONFIRMATION_SCHEMA,
+        "brief": brief.model_dump(by_alias=True),
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def compose_detail_requirements(brief: PlanningBrief) -> str:

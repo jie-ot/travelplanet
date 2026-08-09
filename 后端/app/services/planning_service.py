@@ -105,6 +105,26 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                     brief=brief,
                     checklist=planning_intake_service.build_checklist(brief),
                 )
+            expected_confirmation_token = planning_intake_service.confirmation_token(
+                brief
+            )
+            if request.confirmation_token != expected_confirmation_token:
+                log_event(
+                    "planning_confirmation_blocked",
+                    status="stale_confirmation",
+                    supplied=bool(request.confirmation_token),
+                    planning_model=request.planning_model,
+                )
+                return PlanningResponse(
+                    phase="confirming",
+                    assistant_message=(
+                        "确认清单已经更新，请重新核对后再点击生成行程。"
+                    ),
+                    planning_model=request.planning_model,
+                    brief=brief,
+                    checklist=planning_intake_service.build_checklist(brief),
+                    confirmation_token=expected_confirmation_token,
+                )
             planning_message = planning_intake_service.confirmed_requirement_text(
                 brief,
                 request.message,
@@ -325,6 +345,11 @@ def _collect_requirements(
             else "必要信息已经齐了。请核对确认清单；你可以继续补充，也可以确认生成。"
         )
     checklist = planning_intake_service.build_checklist(brief)
+    confirmation_token = (
+        planning_intake_service.confirmation_token(brief)
+        if phase == "confirming"
+        else None
+    )
     log_event(
         "planning_intake_result",
         status=phase,
@@ -340,6 +365,7 @@ def _collect_requirements(
         planning_model=request.planning_model,
         brief=brief,
         checklist=checklist,
+        confirmation_token=confirmation_token,
     )
 
 

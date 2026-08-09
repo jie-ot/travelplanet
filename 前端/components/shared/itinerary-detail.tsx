@@ -19,7 +19,8 @@ import {
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import { useApp } from "@/components/shared/app-context"
 import { resolveAssetUrl } from "@/lib/asset"
-import { saveTravelImage } from "@/lib/postcard-save"
+import { renderItineraryImage } from "@/lib/itinerary-image"
+import { saveTravelImage, saveTravelImageBlob } from "@/lib/postcard-save"
 import type { DailyMap, ItineraryData, Schedule } from "@/types"
 
 const PERIOD_ICONS: Record<string, string> = {
@@ -50,6 +51,7 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
   const [previewMap, setPreviewMap] = useState<{ map: DailyMap; date: string } | null>(null)
   const [pendingSave, setPendingSave] = useState<{ map: DailyMap; date: string } | null>(null)
   const [savingMap, setSavingMap] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const mood = destinationMood(trip_info.destination)
   const activeDayIndex = Math.max(
     0,
@@ -92,6 +94,24 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
       .finally(() => setSavingMap(false))
   }
 
+  function exportItinerary() {
+    if (exporting) return
+    setExporting(true)
+    void renderItineraryImage(data)
+      .then((blob) =>
+        saveTravelImageBlob(
+          blob,
+          `${trip_info.destination}-${trip_info.start_date}-核心行程`,
+          "核心行程",
+        ),
+      )
+      .then(() => toast("核心行程长图已保存", "success"))
+      .catch((error: unknown) =>
+        toast(error instanceof Error ? error.message : "长图保存失败，请稍后重试", "error"),
+      )
+      .finally(() => setExporting(false))
+  }
+
   return (
     <>
       <article className={`itinerary-experience itinerary-mood-${mood}`}>
@@ -109,6 +129,17 @@ export function ItineraryDetail({ data }: { data: ItineraryData }) {
           </p>
         </div>
       </header>
+
+      <div className="itinerary-export-bar">
+        <div>
+          <strong>保存核心行程</strong>
+          <span>包含全部日期与关键安排</span>
+        </div>
+        <button type="button" onClick={exportItinerary} disabled={exporting}>
+          <Download className="size-4" aria-hidden />
+          {exporting ? "正在生成…" : "导出长图"}
+        </button>
+      </div>
 
       {advisories && advisories.length > 0 ? (
         <aside className="itinerary-advisories" role="status">
