@@ -9,6 +9,7 @@ transaction (a memory failure never rolls back a saved Plan).
 
 from __future__ import annotations
 
+from collections import Counter
 import logging
 
 from sqlmodel import Session, select
@@ -121,17 +122,72 @@ def _merge_memory(
     destination = data.trip_info.destination.strip()
     if not destination:
         return
+    preferences = _memory_preferences_from_itinerary(data)
+    if not preferences:
+        preferences = ["偏好围绕明确目的地组织可执行的旅行计划"]
     try:
         with session_scope() as session:
             memory_service.merge_memory_update(
                 session,
                 user_id=user_id,
-                add_preferences=[f"目的地偏好：{destination}"],
+                add_preferences=preferences,
                 weaken_preferences=[],
-                evidence_summary=f"用户保存了前往「{destination}」的行程规划。",
-                confidence=0.3,
+                evidence_summary=f"用户保存了前往「{destination}」的行程规划，系统从行程内容中提炼长期旅行偏好。",
+                confidence=0.42,
                 source_type=source_type,
                 source_id=source_id,
             )
     except Exception:  # noqa: BLE001
         logger.exception("memory merge failed for plan %s (non-fatal)", source_id)
+
+
+def _memory_preferences_from_itinerary(data: ItineraryData) -> list[str]:
+    """Derive stable travel preferences from itinerary content, not destinations."""
+    exp = data.experience_summary
+    texts: list[str] = []
+    tags: list[str] = []
+    if exp:
+        texts.extend([exp.trip_theme, exp.pace, exp.weather_summary])
+        texts.extend(exp.highlights)
+        tags.extend(exp.personalization_tags)
+    texts.extend(data.food_recommendations)
+    for day in data.itinerary:
+        texts.append(day.title or "")
+        for schedule in day.schedules:
+            texts.extend([schedule.activity, schedule.note or "", schedule.place_name or ""])
+            tags.extend(schedule.tags)
+
+    corpus = " ".join([text for text in texts + tags if text])
+    tag_counts = Counter(tag for tag in tags if tag)
+    preferences: list[str] = []
+
+    def add_if(words: tuple[str, ...], preference: str) -> None:
+        if preference in preferences:
+            return
+        if any(word in corpus for word in words) or any(tag in words for tag in tag_counts):
+            preferences.append(preference)
+
+    add_if(
+        ("历史", "文化", "博物馆", "老街", "街区", "建筑", "展馆", "故事", "遗址"),
+        "偏好具有历史文化和地方故事感的旅行体验",
+    )
+    add_if(
+        ("自然", "风景", "山", "海", "湖", "森林", "公园", "日落", "湿地", "海岸"),
+        "偏好自然景观和环境氛围强的目的地",
+    )
+    add_if(
+        ("摄影", "拍照", "照片", "光影", "夜景", "明信片", "画面"),
+        "偏好用照片记录城市空间、光线和氛围",
+    )
+    add_if(
+        ("美食", "餐厅", "小吃", "咖啡", "市集", "本地菜", "特色菜"),
+        "重视在地美食和地方生活体验",
+    )
+    add_if(
+        ("慢", "轻松", "自由", "弹性", "不赶", "留白", "深度"),
+        "偏好留有弹性和慢节奏的行程安排",
+    )
+    if exp and exp.intensity <= 45 and "偏好留有弹性和慢节奏的行程安排" not in preferences:
+        preferences.append("偏好留有弹性和慢节奏的行程安排")
+
+    return preferences[:3]
