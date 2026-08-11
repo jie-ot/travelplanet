@@ -245,7 +245,14 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
         memory_future: Future[MemoryUpdateResult] | None = None
 
         with ThreadPoolExecutor(max_workers=3) as executor:
-            memory_future = executor.submit(call_in_current_context(_propose_memory_update, location))
+            memory_future = executor.submit(
+                call_in_current_context(
+                    _propose_memory_update,
+                    location=location,
+                    analysis=analysis,
+                    requirements=request.requirements,
+                )
+            )
             postcard_future: Future[tuple[list[tuple[str, str, int]], list[str]]] | None = None
             report_future: Future[ReportDraftResult] | None = None
 
@@ -731,11 +738,31 @@ def _discard(asset_ids: list[str]) -> None:
         logger.exception("failed to discard temporary assets after generate failure")
 
 
-def _propose_memory_update(location: str) -> MemoryUpdateResult:
+def _propose_memory_update(
+    *,
+    location: str,
+    analysis: PhotoAnalysisResult,
+    requirements: str,
+) -> MemoryUpdateResult:
+    useful_photos = [photo for photo in analysis.photos if photo.suitability != "unsuitable"]
+    scene_lines = [
+        f"- {photo.scene_summary}"
+        for photo in useful_photos[:8]
+        if photo.scene_summary.strip()
+    ]
+    evidence = "\n".join(
+        [
+            f"用户完成了一次旅行内容生成，整体地点推断：{location}。",
+            f"用户需求：{requirements.strip()[:240] or '无明确额外需求'}",
+            "照片和创作证据：",
+            *scene_lines,
+            "请只提炼可复用的长期旅行偏好，不要把地点名称本身当作偏好。",
+        ]
+    )
     return orchestrator.propose_memory_update(
         source_task="generate",
         location=location,
-        evidence_summary=f"用户在「{location}」完成了一次旅行内容生成。",
+        evidence_summary=evidence,
     )
 
 

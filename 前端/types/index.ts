@@ -217,6 +217,39 @@ export interface PlanningProgressSnapshot {
   done: boolean
 }
 
+/* ---------------- 旅行记忆展示 (TravelMemory) ---------------- */
+
+export interface TravelMemoryDescription {
+  id: string
+  icon: string
+  title: string
+  content: string
+  planningHint?: string | null
+  sourceLabels?: string[]
+  editable: boolean
+}
+
+export interface TravelMemoryPlanningPreference {
+  key: "transport" | "hotel" | "attractions" | "food" | "pace" | "other"
+  label: string
+  value: string
+  placeholder: string
+  helper: string
+  editable: boolean
+}
+
+export interface TravelMemoryDisplay {
+  intro: string | null
+  overviewTitle?: string | null
+  overviewContent?: string | null
+  planningPreferences: TravelMemoryPlanningPreference[]
+  memories: TravelMemoryDescription[]
+  editable: boolean
+  updatedAt: string | null
+  version: number
+  isEmpty: boolean
+}
+
 /* ---------------- 结构化行程数据 (ItineraryData) ---------------- */
 
 export interface ItineraryData {

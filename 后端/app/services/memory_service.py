@@ -15,6 +15,7 @@ already-saved business record.
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlmodel import Session, select
 
@@ -35,6 +36,22 @@ WEAKENED_THRESHOLD = 0.2
 
 VALID_SOURCE_TYPES = {"generate", "plan_save", "plan_update", "manual"}
 
+PLANNING_PREFERENCE_ORDER = (
+    ("transport", "交通偏好"),
+    ("hotel", "酒店偏好"),
+    ("attractions", "景点偏好"),
+    ("food", "餐饮偏好"),
+    ("pace", "行程节奏"),
+    ("other", "其他特别偏好"),
+)
+
+LOW_VALUE_MEMORY_PATTERNS = (
+    re.compile(r"^(用户)?(喜欢|偏好|关注|去过)?[\u4e00-\u9fffA-Za-z·\-\s]{1,12}(旅游|旅行|旅行内容|旅游内容)$"),
+    re.compile(r"^(目的地偏好|偏好)[:：][\u4e00-\u9fffA-Za-z·\-\s]{1,12}$"),
+)
+
+LOW_VALUE_MEMORY_WORDS = ("未知地点", "未知目的地", "小众未知地点", "旅行相关内容", "旅游相关内容")
+
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -42,6 +59,19 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 def _normalize_key(text: str) -> str:
     return text.strip().lower()
+
+
+def _is_low_value_preference(text: str) -> bool:
+    value = text.strip()
+    if not value:
+        return True
+    if any(word in value for word in LOW_VALUE_MEMORY_WORDS):
+        return True
+    if "\n" in value:
+        return False
+    if len(value) < 6:
+        return True
+    return any(pattern.fullmatch(value) for pattern in LOW_VALUE_MEMORY_PATTERNS)
 
 
 def get_or_create_current_memory(session: Session, user_id: str) -> UserMemory:
@@ -64,15 +94,37 @@ def get_or_create_current_memory(session: Session, user_id: str) -> UserMemory:
     return memory
 
 
-def _render_memory_text(preferences: list[dict]) -> str:
+def _render_memory_text(preferences: list[dict], planning_preferences: dict | None = None) -> str:
     active = [p for p in preferences if p.get("status") != "weakened"]
-    if not active:
-        return INITIAL_MEMORY_TEXT
-    lines = ["稳定旅行偏好："]
-    for pref in sorted(active, key=lambda p: p.get("confidence", 0), reverse=True):
-        conf = pref.get("confidence", 0)
-        lines.append(f"- {pref.get('summary', pref.get('key', ''))}（置信度 {conf:.2f}）")
-    return "\n".join(lines)
+    lines: list[str] = []
+    if active:
+        lines.append("稳定旅行偏好：")
+        for pref in sorted(active, key=lambda p: p.get("confidence", 0), reverse=True):
+            conf = pref.get("confidence", 0)
+            lines.append(f"- {pref.get('summary', pref.get('key', ''))}（置信度 {conf:.2f}）")
+
+    planning_lines = _render_planning_preferences(planning_preferences)
+    if planning_lines:
+        if lines:
+            lines.append("")
+        lines.extend(planning_lines)
+
+    if lines:
+        return "\n".join(lines)
+    return INITIAL_MEMORY_TEXT
+
+
+def _render_planning_preferences(planning_preferences: dict | None) -> list[str]:
+    if not isinstance(planning_preferences, dict):
+        return []
+    items: list[str] = []
+    for key, label in PLANNING_PREFERENCE_ORDER:
+        value = str(planning_preferences.get(key) or "").strip()
+        if value:
+            items.append(f"- {label}：{value}")
+    if not items:
+        return []
+    return ["给规划直接使用的特别偏好：", *items]
 
 
 def merge_memory_update(
@@ -102,7 +154,7 @@ def merge_memory_update(
     now_iso = utcnow().isoformat()
 
     for raw in add_preferences:
-        if not raw or not raw.strip():
+        if not raw or not raw.strip() or _is_low_value_preference(raw):
             continue
         key = _normalize_key(raw)
         existing = by_key.get(key)
@@ -142,7 +194,8 @@ def merge_memory_update(
 
     mem_json["preferences"] = preferences
     memory.memory_json = mem_json
-    memory.memory_text = _render_memory_text(preferences)
+    planning_preferences = mem_json.get("planning_preferences")
+    memory.memory_text = _render_memory_text(preferences, planning_preferences if isinstance(planning_preferences, dict) else None)
     memory.version = int(memory.version) + 1
     memory.last_source_type = source_type
     memory.last_source_id = source_id
