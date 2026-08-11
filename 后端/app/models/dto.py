@@ -268,3 +268,58 @@ class PlanningResponse(CamelModel):
 
 class PlanSaveRequest(CamelModel):
     itinerary_data: ItineraryData
+
+
+# ============================================================
+# User-facing travel memory display
+# ============================================================
+
+
+class MemoryDisplayItem(CamelModel):
+    id: str
+    icon: str
+    title: str
+    content: str
+    planning_hint: str | None = None
+    source_labels: list[str] = Field(default_factory=list)
+    editable: bool = True
+
+
+class MemoryPlanningPreferenceField(CamelModel):
+    key: str
+    label: str
+    value: str = ""
+    placeholder: str
+    helper: str
+    editable: bool = True
+
+
+class TravelMemoryDisplay(CamelModel):
+    intro: str | None = None
+    overview_title: str | None = None
+    overview_content: str | None = None
+    planning_preferences: list[MemoryPlanningPreferenceField] = Field(default_factory=list)
+    memories: list[MemoryDisplayItem] = Field(default_factory=list)
+    editable: bool = True
+    updated_at: str | None = None
+    version: int
+    is_empty: bool = False
+
+
+class MemoryDescriptionUpdateRequest(CamelModel):
+    title: str
+    content: str
+
+
+class MemoryOverviewUpdateRequest(CamelModel):
+    title: str
+    content: str
+
+
+class MemoryPlanningPreferencesUpdateRequest(CamelModel):
+    transport: str = ""
+    hotel: str = ""
+    attractions: str = ""
+    food: str = ""
+    pace: str = ""
+    other: str = ""

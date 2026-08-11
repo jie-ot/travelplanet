@@ -12,6 +12,7 @@ import type {
   PlanningResponse,
   PostcardGroup,
   Report,
+  TravelMemoryDisplay,
 } from "@/types"
 import { apiClient, jsonInit } from "./http-client"
 import type { GenerateInput, GenerateResult, PlanWithAIInput, TravelApi } from "./api"
@@ -59,6 +60,32 @@ export const realApi: TravelApi = {
 
   updatePlan(id: string, input: { itineraryData: ItineraryData }) {
     return apiClient<Plan>(`/plans/${id}`, jsonInit("PUT", input))
+  },
+
+  getTravelMemory() {
+    return apiClient<TravelMemoryDisplay>("/memories/travel")
+  },
+
+  updateTravelMemoryOverview(input: { title: string; content: string }) {
+    return apiClient<TravelMemoryDisplay>("/memories/travel/overview", jsonInit("PUT", input))
+  },
+
+  updateTravelMemoryDescription(id: string, input: { title: string; content: string }) {
+    return apiClient<TravelMemoryDisplay>(
+      `/memories/travel/descriptions/${encodeURIComponent(id)}`,
+      jsonInit("PUT", input),
+    )
+  },
+
+  updateTravelMemoryPlanningPreferences(input: { transport: string; hotel: string; attractions: string; food: string; pace: string; other: string }) {
+    return apiClient<TravelMemoryDisplay>("/memories/travel/planning-preferences", jsonInit("PUT", input))
+  },
+
+  deleteTravelMemoryDescription(id: string) {
+    return apiClient<TravelMemoryDisplay>(
+      `/memories/travel/descriptions/${encodeURIComponent(id)}`,
+      jsonInit("DELETE"),
+    )
   },
 
   async deletePostcardGroup(id: string) {
