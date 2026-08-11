@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.models.dto import ReportChartPoint
+from app.models.dto import CamelModel, PlanningBrief, ReportChartPoint, TravelProfileData
 
 __all__ = [
     "PhotoAnalysisItem",
@@ -24,6 +24,7 @@ __all__ = [
     "ReportChartPoint",
     "ReportDraftResult",
     "MemoryUpdateResult",
+    "PlanningIntakeResult",
 ]
 
 
@@ -74,6 +75,7 @@ class ReportDraftResult(BaseModel):
     personality_summary: str
     content: str
     chart_data: list[ReportChartPoint]
+    profile_data: TravelProfileData
 
 
 class MemoryUpdateResult(BaseModel):
@@ -82,3 +84,10 @@ class MemoryUpdateResult(BaseModel):
     evidence_summary: str
     confidence: float
     source_task: Literal["generate", "plan_save", "plan_update"]
+
+
+class PlanningIntakeResult(CamelModel):
+    """Model-produced conversational reply plus the cumulative requirement state."""
+
+    assistant_message: str
+    brief: PlanningBrief

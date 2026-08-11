@@ -1,13 +1,14 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
 @import 'shadcn/tailwind.css';
+@import './experience.css';
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --font-heading: var(--font-sans);
-  --font-sans: var(--font-geist-sans), 'Geist Fallback', system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), 'Geist Mono Fallback';
+  --font-sans: 'Noto Sans CJK SC', 'HarmonyOS Sans SC', 'MiSans', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', 'Roboto Mono', ui-monospace, monospace;
   --font-display: var(--font-display-family);
   --font-editorial: var(--font-editorial-family);
 
@@ -85,8 +86,10 @@
   --input: #d9e1df;
   --ring: #078fab;
 
-  --font-display-family: var(--font-display-sc), 'FZLanTingHeiS-DB-GB', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
-  --font-editorial-family: var(--font-editorial-sc), 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', STSong, serif;
+  --font-soft-family: 'Noto Sans CJK SC', 'HarmonyOS Sans SC', 'MiSans', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+  --font-rounded-family: ui-rounded, 'SF Pro Rounded', 'HarmonyOS Sans SC', 'MiSans', 'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif;
+  --font-display-family: var(--font-rounded-family);
+  --font-editorial-family: var(--font-soft-family);
 
   /* 雷达图 5 维配色 */
   --chart-1: oklch(0.62 0.108 218);
@@ -133,7 +136,7 @@
   }
 }
 
-/* ---------- 共享交互与材质 ---------- */
+/* ---------- 共享交互与材质：稳定、轻量的按钮反馈 ---------- */
 .ui-pressable,
 .ui-icon-button,
 button:not(:disabled),
@@ -158,9 +161,17 @@ button:not(:disabled):active,
 [role='button']:active,
 .ui-pressable:not(:disabled):active,
 .ui-icon-button:not(:disabled):active {
-  filter: saturate(1.04) brightness(0.98);
-  transform: scale(0.965);
-  transition-duration: 80ms;
+  filter: saturate(1.02) brightness(0.985);
+  transform: translateY(1px) scale(0.985);
+  transition-duration: 70ms;
+}
+
+button:not(:disabled):focus-visible,
+[role='button']:focus-visible,
+.ui-pressable:not(:disabled):focus-visible,
+.ui-icon-button:not(:disabled):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 @media (hover: hover) and (pointer: fine) {

@@ -1,4 +1,4 @@
-"""Synchronous, non-blocking access to MCP stdio servers (A′ rail / flight).
+"""Synchronous, non-blocking access to MCP stdio servers (A′ rail).
 
 Why this exists (《外部事实源与工具调用规范》三·补充): the project endpoints and
 services are synchronous, but the community MCP servers are spawned via
@@ -45,7 +45,7 @@ logger = logging.getLogger("travelplanet")
 # Known runners; a leading flag (e.g. "-y") implies npx (node ecosystem).
 _KNOWN_RUNNERS = {"npx", "uvx", "pipx", "uv", "python", "python3", "node"}
 
-# Child MCP processes (e.g. flight-ticket-mcp-server) may print emoji; on Windows the
+# Child MCP processes may print emoji; on Windows the
 # default console encoding is GBK unless these are set.
 _SUBPROCESS_UTF8_ENV: dict[str, str] = {
     "PYTHONIOENCODING": "utf-8",
@@ -68,7 +68,7 @@ def parse_stdio_endpoint(endpoint: str) -> tuple[str, list[str]] | None:
     is also accepted for backward compatibility:
       "stdio:uvx mcp-server-12306"               -> ("uvx", ["mcp-server-12306"])
       "stdio:npx -y 12306-mcp"                   -> ("npx", ["-y", "12306-mcp"])
-      "stdio:uvx flight-ticket-mcp-server@latest" -> ("uvx", ["flight-ticket-mcp-server@latest"])
+      "stdio:npx -y 12306-mcp" -> ("npx", ["-y", "12306-mcp"])
       "stdio -y 12306-mcp"                       -> ("npx", ["-y", "12306-mcp"])  (compat)
     Returns None when the endpoint is empty or unparseable.
     """

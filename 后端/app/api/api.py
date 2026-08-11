@@ -12,6 +12,7 @@ from app.api.endpoints import (
     ai_planning,
     generate,
     images,
+    memories,
     plans,
     postcard_groups,
     reports,
@@ -25,3 +26,4 @@ api_router.include_router(plans.router)
 api_router.include_router(images.router)
 api_router.include_router(generate.router)
 api_router.include_router(ai_planning.router)
+api_router.include_router(memories.router)

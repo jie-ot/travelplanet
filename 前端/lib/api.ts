@@ -2,7 +2,19 @@
  * 业务 API 门面（唯一对外入口）。
  * View 与 AppProvider 只依赖本文件，所有请求由 real-api 和 http-client 统一处理。
  */
-import type { ItineraryData, Plan, PostcardGroup, Report, UploadedPhoto } from "@/types"
+import type {
+  ItineraryData,
+  Plan,
+  PlanningBrief,
+  PlanningChatMessage,
+  PlanningModel,
+  PlanningProgressSnapshot,
+  PlanningResponse,
+  PostcardGroup,
+  Report,
+  TravelMemoryDisplay,
+  UploadedPhoto,
+} from "@/types"
 import { realApi } from "./real-api"
 
 export interface GenerateInput {
@@ -18,7 +30,13 @@ export interface GenerateResult {
 
 export interface PlanWithAIInput {
   message: string
+  planningModel: PlanningModel
   context: ItineraryData | null
+  messages?: PlanningChatMessage[]
+  brief?: PlanningBrief | null
+  confirmed?: boolean
+  /** 客户端生成的进度令牌；带上后可用 getPlanningProgress 轮询真实阶段。 */
+  progressToken?: string
 }
 
 /** 后端能力契约。 */
@@ -33,9 +51,17 @@ export interface TravelApi {
   generateTravelArtifacts(input: GenerateInput): Promise<GenerateResult>
 
   // 旅行前流
-  planWithAI(input: PlanWithAIInput): Promise<ItineraryData>
+  planWithAI(input: PlanWithAIInput): Promise<PlanningResponse>
+  getPlanningProgress(token: string): Promise<PlanningProgressSnapshot | null>
   createPlan(input: { itineraryData: ItineraryData }): Promise<Plan>
   updatePlan(id: string, input: { itineraryData: ItineraryData }): Promise<Plan>
+
+  // 旅行记忆展示
+  getTravelMemory(): Promise<TravelMemoryDisplay>
+  updateTravelMemoryOverview(input: { title: string; content: string }): Promise<TravelMemoryDisplay>
+  updateTravelMemoryDescription(id: string, input: { title: string; content: string }): Promise<TravelMemoryDisplay>
+  updateTravelMemoryPlanningPreferences(input: { transport: string; hotel: string; attractions: string; food: string; pace: string; other: string }): Promise<TravelMemoryDisplay>
+  deleteTravelMemoryDescription(id: string): Promise<TravelMemoryDisplay>
 
   // 删除
   deletePostcardGroup(id: string): Promise<void>
@@ -58,14 +84,32 @@ export function uploadImage(file: File): Promise<{ assetId: string; imageUrl: st
 export function generateTravelArtifacts(input: GenerateInput): Promise<GenerateResult> {
   return realApi.generateTravelArtifacts(input)
 }
-export function planWithAI(input: PlanWithAIInput): Promise<ItineraryData> {
+export function planWithAI(input: PlanWithAIInput): Promise<PlanningResponse> {
   return realApi.planWithAI(input)
+}
+export function getPlanningProgress(token: string): Promise<PlanningProgressSnapshot | null> {
+  return realApi.getPlanningProgress(token)
 }
 export function createPlan(input: { itineraryData: ItineraryData }): Promise<Plan> {
   return realApi.createPlan(input)
 }
 export function updatePlan(id: string, input: { itineraryData: ItineraryData }): Promise<Plan> {
   return realApi.updatePlan(id, input)
+}
+export function getTravelMemory(): Promise<TravelMemoryDisplay> {
+  return realApi.getTravelMemory()
+}
+export function updateTravelMemoryOverview(input: { title: string; content: string }): Promise<TravelMemoryDisplay> {
+  return realApi.updateTravelMemoryOverview(input)
+}
+export function updateTravelMemoryDescription(id: string, input: { title: string; content: string }): Promise<TravelMemoryDisplay> {
+  return realApi.updateTravelMemoryDescription(id, input)
+}
+export function updateTravelMemoryPlanningPreferences(input: { transport: string; hotel: string; attractions: string; food: string; pace: string; other: string }): Promise<TravelMemoryDisplay> {
+  return realApi.updateTravelMemoryPlanningPreferences(input)
+}
+export function deleteTravelMemoryDescription(id: string): Promise<TravelMemoryDisplay> {
+  return realApi.deleteTravelMemoryDescription(id)
 }
 export function deletePostcardGroup(id: string): Promise<void> {
   return realApi.deletePostcardGroup(id)

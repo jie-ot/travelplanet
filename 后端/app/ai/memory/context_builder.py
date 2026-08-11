@@ -26,9 +26,12 @@ def build_planning_user_text(
     parts.append(f"【用户长期旅行偏好摘要】\n{memory_summary}")
     parts.append(f"【累计用户需求（含本轮新增要求）】\n{message}")
     if context is not None:
+        compact_context = context.model_dump()
+        for day in compact_context.get("itinerary", []):
+            day.pop("daily_maps", None)
         parts.append(
             "【最新完整行程 context（只保留上一版规划；请在此基础上重写，未涉及部分保持不变）】\n"
-            + json.dumps(context.model_dump(), ensure_ascii=False)
+            + json.dumps(compact_context, ensure_ascii=False)
         )
     else:
         parts.append("【当前完整行程 context】\nnull（首轮，请新建完整行程）")
@@ -36,7 +39,7 @@ def build_planning_user_text(
         rails = fact_pack.get("rails") or []
         if rails:
             rail_rule = (
-                "仅当 Function Calling 返回 rails 且 status=ok 时：可在 bookings/note 中引用其参考车次、"
+                "仅当 Function Calling 返回 rails 且 status=ok 时：可在 bookings 中引用其参考车次、"
                 "时刻、参考票价，但每条都必须显式附“以 12306 官方实时为准，票价余票请"
                 "官方渠道确认”；严禁超出工具字段编造其它车次。"
             )

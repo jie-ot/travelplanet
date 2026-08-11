@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     VIVO_MAX_RETRY: int = 1
     VIVO_RETRY_BACKOFF_SECONDS: float = 1.0
     VIVO_IMAGE_SEQUENTIAL_GENERATION: str = "disabled"
+    # —— DeepSeek OpenAI-compatible planning models ——
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_CHAT_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_FLASH_MODEL: str = "deepseek-v4-flash"
+    DEEPSEEK_PRO_MODEL: str = "deepseek-v4-pro"
     PHOTO_ANALYZE_PARALLELISM: int = 5
     GENERATION_FILE_IO_PARALLELISM: int = 4
     GENERATION_IMAGE_PARALLELISM: int = 2
@@ -80,20 +85,26 @@ class Settings(BaseSettings):
     QWEATHER_API_KEY: str = ""
     QWEATHER_BASE_URL: str = "https://devapi.qweather.com"
 
-    # —— A′ 类：社区 MCP（默认开启，失败静默降级 B）——
+    # —— A′ 类：社区铁路 MCP（失败静默降级 B）——
     RAIL_MCP_ENABLED: bool = True
     RAIL_MCP_ENDPOINT: str = "stdio:npx -y 12306-mcp"
-    # 机票 MCP 默认关闭：社区 server 唯一可按「航线+日期」查询的 searchFlightRoutes
-    # 依赖无头浏览器抓取携程，而携程对无头抓取返回空白页 → 恒 0 航班，且单次固有 ~60s。
-    # 经多轮 debug（修复 GBK emoji 崩溃、直连查询、抓取原始页面均验证）确认无法产出真实
-    # FlightFact，故直接降级 B（本地携程入口指引），不再尝试调用以免无谓延迟。
-    FLIGHT_MCP_ENABLED: bool = False
-    FLIGHT_MCP_ENDPOINT: str = (
-        "stdio:uvx --with DrissionPage==4.1.1.4 flight-ticket-mcp-server==1.0.1"
+
+    # —— A′ 类：飞友 Tripmatch MCP（航班与空铁中转候选）——
+    # Tripmatch 官方文档给出的服务路径大小写有误；实际可达路径为 lowercase。
+    VARIFLIGHT_TRIPMATCH_MCP_ENABLED: bool = True
+    VARIFLIGHT_TRIPMATCH_MCP_URL: str = (
+        "https://ai.variflight.com/servers/tripmatch/mcp/"
     )
-    # 机票 MCP 冷启动由 MCP_STARTUP_TIMEOUT_SECONDS（后台、不阻塞请求线程）兜底；
-    # 会话就绪后单次查询若 10s 内拿不到结果即视为失败并快速降级 B，避免拖慢机票轮次。
-    FLIGHT_MCP_TIMEOUT_SECONDS: int = 10
+    # Tripmatch 与 Aviation 共用；仅在运行时 URL query 中传给上游，禁止记录。
+    VARIFLIGHT_API_KEY: str = ""
+    VARIFLIGHT_TRIPMATCH_TIMEOUT_SECONDS: int = 30
+
+    # —— A′ 类：飞友 Aviation MCP（纯航班中转）——
+    VARIFLIGHT_AVIATION_MCP_ENABLED: bool = True
+    VARIFLIGHT_AVIATION_MCP_URL: str = (
+        "https://ai.variflight.com/servers/aviation/mcp/"
+    )
+    VARIFLIGHT_AVIATION_TIMEOUT_SECONDS: int = 30
 
     # —— 工具通用超时/重试 ——
     TOOL_TIMEOUT_SECONDS: int = 20

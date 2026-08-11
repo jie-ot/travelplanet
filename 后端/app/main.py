@@ -57,10 +57,6 @@ async def _prewarm_mcp() -> None:
         if settings.TOOLS_ENABLED and settings.RAIL_MCP_ENABLED and settings.RAIL_MCP_ENDPOINT:
             mcp_stdio.prewarm(settings.RAIL_MCP_ENDPOINT)
             endpoints.append(("rail", settings.RAIL_MCP_ENDPOINT))
-        if settings.TOOLS_ENABLED and settings.FLIGHT_MCP_ENABLED and settings.FLIGHT_MCP_ENDPOINT:
-            mcp_stdio.prewarm(settings.FLIGHT_MCP_ENDPOINT, extra_env={"MCP_TRANSPORT": "stdio"})
-            endpoints.append(("flight", settings.FLIGHT_MCP_ENDPOINT))
-
         if not settings.MCP_WAIT_READY_ON_STARTUP or not endpoints:
             return
 

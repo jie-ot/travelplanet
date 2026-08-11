@@ -3,7 +3,7 @@
 import { cn } from "@/lib/utils"
 
 /** 生成中待机动画：星球旋转 + 轨道 + 星尘流动。 */
-export function PlanetLoader({ label = "正在生成中…", className }: { label?: string; className?: string }) {
+export function PlanetLoader({ label = "正在生成中…", className }: { label?: string | null; className?: string }) {
   return (
     <div className={cn("flex flex-col items-center justify-center gap-4 py-10", className)}>
       <div className="relative flex size-30 items-center justify-center">
@@ -30,7 +30,7 @@ export function PlanetLoader({ label = "正在生成中…", className }: { labe
           />
         ))}
       </div>
-      <p className="text-sm font-medium text-muted-foreground">{label}</p>
+      {label ? <p className="text-sm font-medium text-muted-foreground">{label}</p> : null}
     </div>
   )
 }

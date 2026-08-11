@@ -1,0 +1,4 @@
+interface:
+  display_name: "TravelPlanet 后端上云"
+  short_description: "安全打包、候选验证、切换并回滚腾讯云 Docker 后端"
+  default_prompt: "Use $travelplanet-backend-deployer to package and safely deploy the latest TravelPlanet backend to Tencent Cloud."

@@ -14,7 +14,7 @@ import {
   Send,
   X,
 } from "lucide-react"
-import { useApp } from "@/components/shared/app-context"
+import { useApp, type GenerationProgress } from "@/components/shared/app-context"
 import { UserBadge } from "@/components/shared/user-badge"
 import { PlanetLoader } from "@/components/shared/planet-loader"
 import { PLACEHOLDER_IMAGE, handleImageError, resolveAssetUrl, shortId } from "@/lib/asset"
@@ -35,7 +35,16 @@ const POSTCARD_BALLOON = "/images/home-postcard-balloon.png"
 const POSTCARD_LAKE = "/images/home-postcard-alpine-lake.png"
 
 export function HomeView() {
-  const { navigate, toast, toastCode, generateArtifacts, generating, postcardGroups } = useApp()
+  const {
+    navigate,
+    toast,
+    toastCode,
+    generateArtifacts,
+    generating,
+    generationProgress,
+    postcardGroups,
+    beginNewPlan,
+  } = useApp()
   const [photos, setPhotos] = useState<LocalPhoto[]>([])
   const [requirements, setRequirements] = useState("")
   const [genPostcards, setGenPostcards] = useState(true)
@@ -185,7 +194,6 @@ export function HomeView() {
         <button type="button" onClick={() => navigate({ page: "postcards" })} aria-label="查看明信片">
           <span className={styles.entryCopy}>
             <strong>查看明信片<em>✦</em></strong>
-            <small>把照片变成旅行明信片</small>
           </span>
           <span className={styles.stitchLine} aria-hidden />
           <span className={styles.arrowStamp} aria-hidden>
@@ -215,13 +223,30 @@ export function HomeView() {
           icon={<Map aria-hidden />}
           title="旅行规划"
           description="规划下一段旅程"
-          onClick={() => navigate({ page: "planning" })}
+          onClick={() => {
+            beginNewPlan()
+            navigate({ page: "planning" })
+          }}
           coral
         />
       </nav>
 
       <section className={styles.latestSlot} aria-label="最近旅程">
-        {latest && photos.length === 0 ? (
+        {photos.length > 0 ? (
+          <div className={styles.photoTray} aria-label={`已选 ${photos.length} 张照片`}>
+            <span>已选 {photos.length}/{MAX_PHOTOS}</span>
+            <div>
+              {photos.map((photo) => (
+                <figure key={photo.id}>
+                  <img src={photo.url || PLACEHOLDER_IMAGE} alt="待生成照片" onError={handleImageError} />
+                  <button type="button" onClick={() => removePhoto(photo.id)} aria-label="移除照片">
+                    <X aria-hidden />
+                  </button>
+                </figure>
+              ))}
+            </div>
+          </div>
+        ) : latest ? (
           <button
             type="button"
             className={styles.latestTicket}
@@ -244,22 +269,6 @@ export function HomeView() {
       </section>
 
       <section className={styles.composer} aria-label="生成旅行内容">
-        {photos.length > 0 ? (
-          <div className={styles.photoTray}>
-            <span>已选 {photos.length}/{MAX_PHOTOS}</span>
-            <div>
-              {photos.map((photo) => (
-                <figure key={photo.id}>
-                  <img src={photo.url || PLACEHOLDER_IMAGE} alt="待生成照片" onError={handleImageError} />
-                  <button type="button" onClick={() => removePhoto(photo.id)} aria-label="移除照片">
-                    <X aria-hidden />
-                  </button>
-                </figure>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
         <div className={styles.envelope}>
           <svg className={styles.postmarkWaves} viewBox="0 0 84 34" aria-hidden>
             <path d="M0 8c15-12 29 12 44 0s29 12 40 0" />
@@ -290,15 +299,115 @@ export function HomeView() {
       </section>
 
       {generating ? (
-        <div className={styles.generating}>
-          <div>
-            <PlanetLoader label="正在为你生成专属内容…" />
-            <p>这可能需要3-5分钟</p>
-          </div>
-        </div>
+        <GenerationWaiting progress={generationProgress} />
       ) : null}
     </div>
   )
+}
+
+function GenerationWaiting({ progress }: { progress: GenerationProgress | null }) {
+  const [tipIndex, setTipIndex] = useState(0)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+
+  useEffect(() => {
+    const elapsedTimer = window.setInterval(() => setElapsedSeconds((seconds) => seconds + 1), 1000)
+    const tipTimer =
+      progress?.phase === "creating"
+        ? window.setInterval(() => setTipIndex((index) => index + 1), 4600)
+        : null
+
+    return () => {
+      window.clearInterval(elapsedTimer)
+      if (tipTimer) window.clearInterval(tipTimer)
+    }
+  }, [progress?.phase])
+
+  const phase = progress?.phase ?? "preparing"
+  const completed = progress?.completed ?? 0
+  const total = progress?.total ?? 0
+  const options = progress?.options ?? { generatePostcards: true, generateReport: false }
+  const isCreating = phase === "creating"
+  const uploadPercent = total > 0 ? Math.round((completed / total) * 100) : 0
+  const tips = generationTips(options)
+  const outputName =
+    options.generatePostcards && options.generateReport
+      ? "明信片与人格报告"
+      : options.generateReport
+        ? "旅行人格报告"
+        : "旅行明信片"
+  const minutes = Math.floor(elapsedSeconds / 60)
+  const seconds = String(elapsedSeconds % 60).padStart(2, "0")
+  const statusText = isCreating
+    ? tips[tipIndex % tips.length]
+    : phase === "preparing"
+      ? `正在读取 ${total} 张照片的时间与位置信息`
+      : `正在上传照片 · ${completed}/${total}`
+
+  return (
+    <div className={styles.generating} aria-busy="true" aria-label="内容生成进度">
+      <div className={styles.progressCard} data-generation-progress-card>
+        <div className={styles.progressVisual}>
+          <PlanetLoader label={null} className="!py-0" />
+          <span>{isCreating ? "AI" : `${uploadPercent}%`}</span>
+        </div>
+
+        <div className={styles.progressCopy} role="status" aria-live="polite" aria-atomic="true">
+          <span className={styles.progressEyebrow}>第 {isCreating ? 2 : 1} / 3 步</span>
+          <h2>{isCreating ? `正在生成${outputName}` : "正在让照片准备就绪"}</h2>
+          <p>{statusText}</p>
+        </div>
+
+        {isCreating ? (
+          <div className={cn(styles.uploadProgress, styles.creatingProgress)} aria-hidden>
+            <span />
+          </div>
+        ) : (
+          <div
+            className={styles.uploadProgress}
+            role="progressbar"
+            aria-label="照片上传进度"
+            aria-valuemin={0}
+            aria-valuemax={total}
+            aria-valuenow={completed}
+          >
+            <span style={{ width: `${uploadPercent}%` }} />
+          </div>
+        )}
+
+        <ol className={styles.progressSteps} aria-label="生成步骤">
+          <li className={isCreating ? styles.stepDone : styles.stepActive}>
+            <span>{isCreating ? <Check aria-hidden /> : "1"}</span>
+            <small>照片就绪</small>
+          </li>
+          <li className={isCreating ? styles.stepActive : styles.stepPending}>
+            <span>2</span>
+            <small>AI 创作</small>
+          </li>
+          <li className={styles.stepPending}>
+            <span>3</span>
+            <small>保存结果</small>
+          </li>
+        </ol>
+
+        <div className={styles.progressMeta}>
+          <span>已等待 {minutes}:{seconds}</span>
+          <span>可能需要3-5分钟</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function generationTips(options: GenerationProgress["options"]): string[] {
+  const tips = ["正在辨认照片中的地点、时间与旅行氛围"]
+  if (options.generatePostcards) {
+    tips.push("正在挑选适合明信片表达的画面与故事")
+  }
+  if (options.generateReport) {
+    tips.push("正在归纳旅行偏好、人格线索与五维数据")
+  }
+  tips.push("生成完成后会自动保存，无需重复点击")
+  return tips
 }
 
 function Postcard({ className, src, alt, seal = false }: { className: string; src: string; alt: string; seal?: boolean }) {

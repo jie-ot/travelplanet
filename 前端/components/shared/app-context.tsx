@@ -1,8 +1,18 @@
 "use client"
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
+import { App as CapacitorApp } from "@capacitor/app"
+import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import { usePathname, useRouter } from "next/navigation"
-import type { BusinessCode, PageType, Plan, PostcardGroup, Report } from "@/types"
+import type {
+  BusinessCode,
+  PageType,
+  Plan,
+  PlanningModel,
+  PlanningResponse,
+  PostcardGroup,
+  Report,
+} from "@/types"
 import {
   createPlan,
   deletePlan as apiDeletePlan,
@@ -16,6 +26,7 @@ import {
   updatePlan,
   uploadImage,
   type GenerateResult,
+  type PlanWithAIInput,
 } from "@/lib/api"
 import { readPhotoMeta } from "@/lib/exif"
 import { AppError, CODE_MESSAGE, friendlyMessage, type BusinessErrorCode } from "@/lib/errors"
@@ -78,6 +89,15 @@ export interface GenerateArtifactsInput {
   options: { generatePostcards: boolean; generateReport: boolean }
 }
 
+export type GenerationPhase = "preparing" | "uploading" | "creating"
+
+export interface GenerationProgress {
+  phase: GenerationPhase
+  completed: number
+  total: number
+  options: GenerateArtifactsInput["options"]
+}
+
 /* ---------------- 多图上传：并发限流 + 单张重试 ---------------- */
 // 同时在传的最大张数：贴合浏览器单域名约 6 个并发连接的上限，避免瞬时请求过多互相拖累
 const UPLOAD_CONCURRENCY = 5
@@ -85,6 +105,15 @@ const UPLOAD_CONCURRENCY = 5
 const UPLOAD_MAX_RETRY = 2
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/**
+ * 生成一次规划请求的进度令牌。
+ * 后端只接受 [A-Za-z0-9_-]，且长度不超过 64；随机段用于区分并发请求。
+ */
+function newProgressToken(): string {
+  const random = Math.random().toString(36).slice(2, 10)
+  return `plan-${Date.now().toString(36)}-${random}`
+}
 
 /**
  * 上传单张：读 EXIF（内部已容错，不抛错）后上传，失败按线性退避重试。
@@ -111,13 +140,19 @@ async function uploadPhotoWithRetry(file: File): Promise<UploadedPhoto> {
  * 在并发上限内并行上传全部照片，结果保持与输入顺序一致。
  * 全有全无：任一张重试后仍失败即整体抛错，绝不静默丢图（保证「选了什么就用什么」）。
  */
-async function uploadAllPhotos(files: File[]): Promise<UploadedPhoto[]> {
+async function uploadAllPhotos(
+  files: File[],
+  onProgress?: (completed: number, total: number) => void,
+): Promise<UploadedPhoto[]> {
   const results = new Array<UploadedPhoto>(files.length)
   let cursor = 0
+  let completed = 0
   const worker = async () => {
     while (cursor < files.length) {
       const index = cursor++
       results[index] = await uploadPhotoWithRetry(files[index])
+      completed += 1
+      onProgress?.(completed, files.length)
     }
   }
   const workerCount = Math.min(UPLOAD_CONCURRENCY, files.length)
@@ -129,6 +164,7 @@ interface AppContextValue {
   // 导航
   navigate: (entry: NavEntry) => void
   goBack: () => void
+  registerBackHandler: (handler: () => void) => () => void
   // 数据
   postcardGroups: PostcardGroup[]
   reports: Report[]
@@ -142,14 +178,17 @@ interface AppContextValue {
   prependReport: (report: Report) => void
   // 首页生成流程
   generating: boolean
+  generationProgress: GenerationProgress | null
   generateArtifacts: (input: GenerateArtifactsInput) => Promise<GenerateResult | null>
   // 旅行规划草稿（本地单一数据源，规范 §10）
   draftItineraryData: ItineraryData | null
   editingPlanId: string | null
   hasUnsavedDraft: boolean
   planning: boolean
-  planFirstTurn: (message: string) => Promise<ItineraryData | null>
-  planRefine: (message: string) => Promise<ItineraryData | null>
+  /** 当前（或最近一次）规划请求的进度令牌，供待机动画轮询真实进度。 */
+  planningProgressToken: string | null
+  planningTurn: (input: PlanWithAIInput) => Promise<PlanningResponse | null>
+  planRefine: (message: string, planningModel: PlanningModel) => Promise<ItineraryData | null>
   beginNewPlan: () => void
   beginEditPlan: (plan: Plan) => void
   updateDraft: (data: ItineraryData) => void
@@ -174,15 +213,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const navigationDepth = useRef(0)
+  const pathnameRef = useRef(pathname)
+  const goBackRef = useRef<() => void>(() => undefined)
+  const backHandlers = useRef<Array<() => void>>([])
   const [postcardGroups, setPostcardGroups] = useState<PostcardGroup[]>([])
   const [reports, setReports] = useState<Report[]>([])
   const [plans, setPlans] = useState<Plan[]>([])
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [generating, setGenerating] = useState(false)
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgress | null>(null)
   const [draftItineraryData, setDraftItineraryData] = useState<ItineraryData | null>(null)
   const [editingPlanId, setEditingPlanId] = useState<string | null>(null)
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState(false)
   const [planning, setPlanning] = useState(false)
+  const [planningProgressToken, setPlanningProgressToken] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [initLoading, setInitLoading] = useState(true)
@@ -215,6 +259,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
     router.replace(parentHref(pathname))
   }, [pathname, router])
+
+  const registerBackHandler = useCallback((handler: () => void) => {
+    backHandlers.current.push(handler)
+    return () => {
+      const index = backHandlers.current.lastIndexOf(handler)
+      if (index >= 0) backHandlers.current.splice(index, 1)
+    }
+  }, [])
+
+  useEffect(() => {
+    pathnameRef.current = pathname
+    goBackRef.current = goBack
+  }, [goBack, pathname])
+
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "android" || !Capacitor.isPluginAvailable("App")) return
+
+    let cancelled = false
+    let listener: PluginListenerHandle | null = null
+
+    void CapacitorApp.addListener("backButton", () => {
+      const handler = backHandlers.current[backHandlers.current.length - 1]
+      if (handler) {
+        handler()
+        return
+      }
+      if (pathnameRef.current === "/") {
+        void CapacitorApp.exitApp()
+        return
+      }
+      goBackRef.current()
+    }).then((handle) => {
+      if (cancelled) {
+        void handle.remove()
+        return
+      }
+      listener = handle
+    })
+
+    return () => {
+      cancelled = true
+      if (listener) void listener.remove()
+    }
+  }, [])
 
   const dismissToast = useCallback((id: string) => {
     setToasts((t) => t.filter((x) => x.id !== id))
@@ -373,11 +461,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const generateArtifacts = useCallback(
     async ({ files, requirements, options }: GenerateArtifactsInput): Promise<GenerateResult | null> => {
       setGenerating(true)
+      setGenerationProgress({
+        phase: "preparing",
+        completed: 0,
+        total: files.length,
+        options,
+      })
       try {
         // 每张照片：读 EXIF（失败置 null，不报错）→ 上传 → 拼装 UploadedPhoto
         // 上传走并发限流 + 单张重试（详见 uploadAllPhotos），支持一次最多 50 张且更抗抖动
-        const photos = await uploadAllPhotos(files)
+        setGenerationProgress({
+          phase: "uploading",
+          completed: 0,
+          total: files.length,
+          options,
+        })
+        const photos = await uploadAllPhotos(files, (completed, total) => {
+          setGenerationProgress({
+            phase: "uploading",
+            completed,
+            total,
+            options,
+          })
+        })
 
+        setGenerationProgress({
+          phase: "creating",
+          completed: files.length,
+          total: files.length,
+          options,
+        })
         const result = await generateTravelArtifacts({ photos, requirements, options })
         // 固定返回 { postcardGroup, report }；通过 if 判断追加，不依赖字段缺失
         if (result.postcardGroup) setPostcardGroups((g) => [result.postcardGroup as PostcardGroup, ...g])
@@ -388,22 +501,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return null
       } finally {
         setGenerating(false)
+        setGenerationProgress(null)
       }
     },
     [toastError],
   )
 
   /* ---------------- 旅行规划对话流程（规范 2.3 / §10） ---------------- */
-  // 首轮：context 传 null，返回完整 ItineraryData，全量替换草稿
-  const planFirstTurn = useCallback(
-    async (message: string): Promise<ItineraryData | null> => {
+  // 需求澄清与确认共用一个入口；只有 completed 响应才写入行程草稿。
+  // 每一轮都自带进度令牌：POST 仍是单次阻塞请求，待机动画另起轮询读取真实阶段。
+  const planningTurn = useCallback(
+    async (input: PlanWithAIInput): Promise<PlanningResponse | null> => {
+      const token = input.progressToken ?? newProgressToken()
+      setPlanningProgressToken(token)
       setPlanning(true)
       try {
-        const data = await planWithAI({ message, context: null })
-        setDraftItineraryData(data)
-        setEditingPlanId(null)
-        setHasUnsavedDraft(true)
-        return data
+        const response = await planWithAI({ ...input, progressToken: token })
+        if (response.itinerary) {
+          setDraftItineraryData(response.itinerary)
+          if (!input.context) setEditingPlanId(null)
+          setHasUnsavedDraft(true)
+        }
+        return response
       } catch (err) {
         toastError(err)
         return null
@@ -414,24 +533,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [toastError],
   )
 
-  // 多轮：context 传当前持有的完整 ItineraryData，返回后全量替换草稿
+  // 已生成行程的后续打磨仍视为用户对当前版本的明确修改请求。
   const planRefine = useCallback(
-    async (message: string): Promise<ItineraryData | null> => {
+    async (message: string, planningModel: PlanningModel): Promise<ItineraryData | null> => {
       if (!draftItineraryData) return null
-      setPlanning(true)
-      try {
-        const data = await planWithAI({ message, context: draftItineraryData })
-        setDraftItineraryData(data)
-        setHasUnsavedDraft(true)
-        return data
-      } catch (err) {
-        toastError(err)
-        return null
-      } finally {
-        setPlanning(false)
-      }
+      const response = await planningTurn({
+        message,
+        planningModel,
+        context: draftItineraryData,
+        messages: [{ role: "user", content: message, planningModel }],
+        confirmed: true,
+      })
+      return response?.itinerary ?? null
     },
-    [draftItineraryData, toastError],
+    [draftItineraryData, planningTurn],
   )
 
   // 全新规划：清空草稿与编辑态
@@ -490,6 +605,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     () => ({
       navigate,
       goBack,
+      registerBackHandler,
       postcardGroups,
       reports,
       plans,
@@ -501,12 +617,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       prependPostcardGroup,
       prependReport,
       generating,
+      generationProgress,
       generateArtifacts,
       draftItineraryData,
       editingPlanId,
       hasUnsavedDraft,
       planning,
-      planFirstTurn,
+      planningProgressToken,
+      planningTurn,
       planRefine,
       beginNewPlan,
       beginEditPlan,
@@ -526,6 +644,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [
       navigate,
       goBack,
+      registerBackHandler,
       postcardGroups,
       reports,
       plans,
@@ -537,12 +656,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       prependPostcardGroup,
       prependReport,
       generating,
+      generationProgress,
       generateArtifacts,
       draftItineraryData,
       editingPlanId,
       hasUnsavedDraft,
       planning,
-      planFirstTurn,
+      planningProgressToken,
+      planningTurn,
       planRefine,
       beginNewPlan,
       beginEditPlan,

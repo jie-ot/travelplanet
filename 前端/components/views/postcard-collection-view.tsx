@@ -1,18 +1,64 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
 import { useSearchParams } from "next/navigation"
-import { ChevronLeft, MapPin } from "lucide-react"
+import { ChevronLeft, Download, MapPin } from "lucide-react"
 import { useApp } from "@/components/shared/app-context"
+import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import { EmptyState } from "@/components/shared/empty-state"
 import { PLACEHOLDER_IMAGE, handleImageError, resolveAssetUrl } from "@/lib/asset"
+import { savePostcardImage } from "@/lib/postcard-save"
+import type { Postcard } from "@/types"
+
+const LONG_PRESS_MS = 650
+const LONG_PRESS_MOVE_TOLERANCE = 12
 
 export function PostcardCollectionView() {
   const searchParams = useSearchParams()
-  const { postcardGroups, goBack } = useApp()
+  const { postcardGroups, goBack, toast } = useApp()
   const group = postcardGroups.find((g) => g.id === searchParams.get("groupId"))
   const [active, setActive] = useState(0)
+  const [pendingSave, setPendingSave] = useState<Postcard | null>(null)
+  const [saving, setSaving] = useState(false)
   const trackRef = useRef<HTMLDivElement>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pressStartRef = useRef<{ x: number; y: number } | null>(null)
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current)
+    longPressTimerRef.current = null
+    pressStartRef.current = null
+  }
+
+  useEffect(
+    () => () => {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current)
+    },
+    [],
+  )
+
+  const startLongPress = (event: ReactPointerEvent<HTMLImageElement>, postcard: Postcard) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return
+    cancelLongPress()
+    pressStartRef.current = { x: event.clientX, y: event.clientY }
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null
+      pressStartRef.current = null
+      if ("vibrate" in navigator) navigator.vibrate(30)
+      setPendingSave(postcard)
+    }, LONG_PRESS_MS)
+  }
+
+  const moveLongPress = (event: ReactPointerEvent<HTMLImageElement>) => {
+    const start = pressStartRef.current
+    if (!start) return
+    if (
+      Math.abs(event.clientX - start.x) > LONG_PRESS_MOVE_TOLERANCE ||
+      Math.abs(event.clientY - start.y) > LONG_PRESS_MOVE_TOLERANCE
+    ) {
+      cancelLongPress()
+    }
+  }
 
   if (!group) {
     return (
@@ -64,14 +110,24 @@ export function PostcardCollectionView() {
       <div
         ref={trackRef}
         onScroll={onScroll}
-        className="flex flex-1 snap-x snap-mandatory overflow-x-auto no-scrollbar"
+        className="flex flex-1 snap-x snap-mandatory overflow-x-auto overscroll-x-contain no-scrollbar"
       >
         {group.postcards.map((pc) => (
-          <div key={pc.id} className="flex w-full shrink-0 snap-center items-center justify-center p-6">
+          <div
+            key={pc.id}
+            className="flex w-full shrink-0 snap-center items-center justify-center p-6 [scroll-snap-stop:always]"
+          >
             <img
               src={resolveAssetUrl(pc.imageUrl) || PLACEHOLDER_IMAGE}
               alt={pc.title}
-              className="max-h-[62vh] w-full rounded-xl border-[5px] border-[#eee5d8] object-contain shadow-2xl"
+              draggable={false}
+              className="max-h-[62vh] w-full select-none rounded-xl border-[5px] border-[#eee5d8] object-contain shadow-2xl [-webkit-touch-callout:none]"
+              onContextMenu={(event) => event.preventDefault()}
+              onPointerDown={(event) => startLongPress(event, pc)}
+              onPointerMove={moveLongPress}
+              onPointerUp={cancelLongPress}
+              onPointerCancel={cancelLongPress}
+              onPointerLeave={cancelLongPress}
               onError={handleImageError}
             />
           </div>
@@ -102,6 +158,44 @@ export function PostcardCollectionView() {
           ))}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!pendingSave}
+        title="保存这张明信片？"
+        description="图片将保存到手机系统相册的“旅行星球”中。"
+        icon={
+          <span className="grid size-12 place-items-center rounded-full bg-primary/12 text-primary">
+            <Download className="size-6" aria-hidden />
+          </span>
+        }
+        onClose={() => {
+          if (!saving) setPendingSave(null)
+        }}
+        actions={[
+          {
+            label: saving ? "正在保存…" : "保存到相册",
+            onClick: () => {
+              if (!pendingSave || saving) return
+              setSaving(true)
+              const imageUrl = resolveAssetUrl(pendingSave.imageUrl) || PLACEHOLDER_IMAGE
+              void savePostcardImage(imageUrl, pendingSave.title)
+                .then(() => {
+                  setPendingSave(null)
+                  toast("已保存到系统相册", "success")
+                })
+                .catch(() => toast("保存失败，请稍后重试", "error"))
+                .finally(() => setSaving(false))
+            },
+          },
+          {
+            label: "取消",
+            variant: "ghost",
+            onClick: () => {
+              if (!saving) setPendingSave(null)
+            },
+          },
+        ]}
+      />
     </div>
   )
 }

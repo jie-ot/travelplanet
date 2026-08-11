@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 
 from app.ai.tools.schemas import RailFact
 from app.core.config import settings
 
 logger = logging.getLogger("travelplanet")
+_QUERY_STATE = threading.local()
 
 
 def is_enabled() -> bool:
@@ -41,6 +43,12 @@ def runtime_status() -> str:
     from app.ai.tools import mcp_stdio
 
     return mcp_stdio.get_runtime_status(settings.RAIL_MCP_ENDPOINT)
+
+
+def last_query_error_code() -> str | None:
+    """Return the current thread's latest rail-query transport failure."""
+    value = getattr(_QUERY_STATE, "error_code", None)
+    return str(value) if value else None
 
 
 def query_rail_sync(origin: str, destination: str, date: str) -> RailFact | None:
@@ -62,11 +70,18 @@ def query_rail_options_sync(
     result once and select representative candidates from 07:00-22:00, one per
     hour when available, prioritizing faster higher-grade trains.
     """
+    _QUERY_STATE.error_code = None
     if not is_enabled():
         return []
     try:
         norms = _invoke_mcp_options(origin, destination, date)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _QUERY_STATE.error_code = (
+            "rail_mcp_timeout"
+            if "timeout" in type(exc).__name__.lower()
+            or "timeout" in str(exc).lower()
+            else "rail_mcp_call_failed"
+        )
         logger.exception("A' rail MCP failed; degrading to B (no exception bubbled)")
         return []
     selected = _select_train_options(norms, max_options=max_options)

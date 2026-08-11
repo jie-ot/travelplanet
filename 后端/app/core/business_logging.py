@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+import traceback
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -34,6 +35,7 @@ class BusinessLog:
         self.request_id = str(fields.pop("request_id", "") or uuid.uuid4())[:8]
         self.started = time.monotonic()
         self._lock = threading.RLock()
+        self._sequence = 0
         self.path = _build_log_path(self.task_name, self.request_id)
         self.write("task_start", status="start", **fields)
 
@@ -55,6 +57,8 @@ class BusinessLog:
             "request_id": self.request_id,
             "event": event,
             "status": status,
+            "pid": os.getpid(),
+            "thread": threading.current_thread().name,
         }
         if message:
             payload["message"] = message
@@ -63,8 +67,10 @@ class BusinessLog:
                 continue
             target = f"detail_{key}" if key in payload else key
             payload[target] = value
-        line = json.dumps(payload, ensure_ascii=False, default=str)
         with self._lock:
+            self._sequence += 1
+            payload["sequence"] = self._sequence
+            line = json.dumps(payload, ensure_ascii=False, default=str)
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
@@ -77,12 +83,13 @@ def business_task(task_name: str, **fields: Any) -> Iterator[BusinessLog]:
     try:
         yield log
     except Exception as exc:
+        error_details = _exception_details(exc)
         log.write(
             "task_finish",
             status="failed",
             message=str(exc),
-            error_type=type(exc).__name__,
             total_ms=log.elapsed_ms(),
+            **error_details,
         )
         raise
     else:
@@ -115,12 +122,13 @@ def timed_stage(stage: str, **fields: Any) -> Iterator[None]:
         yield
     except Exception as exc:
         if log is not None:
+            error_details = _exception_details(exc)
             log.write(
                 stage,
                 status="failed",
                 duration_ms=int((time.monotonic() - started) * 1000),
                 message=str(exc),
-                error_type=type(exc).__name__,
+                **error_details,
                 **fields,
             )
         raise
@@ -151,3 +159,20 @@ def _safe_slug(value: str) -> str:
     cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in value.strip())
     parts = [part for part in cleaned.split("_") if part]
     return "_".join(parts)[:60] or "business_task"
+
+
+def _exception_details(exc: Exception) -> dict[str, Any]:
+    """Return bounded, local-only diagnostics without changing log timing."""
+    cause = exc.__cause__
+    context = exc.__context__ if cause is None else None
+    formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return {
+        "error_type": type(exc).__name__,
+        "error_module": type(exc).__module__,
+        "error_repr": repr(exc)[:2000],
+        "cause_type": type(cause).__name__ if cause is not None else None,
+        "cause_message": str(cause)[:2000] if cause is not None else None,
+        "context_type": type(context).__name__ if context is not None else None,
+        "context_message": str(context)[:2000] if context is not None else None,
+        "traceback": formatted[-12000:],
+    }

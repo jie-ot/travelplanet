@@ -1,8 +1,8 @@
 """Outward DTOs — the single front/back-end contract.
 
 Master definition: 《数据结构与通信接口规范》一、三. Field names, types,
-optionality and enums are the project's unique contract; never add, rename or
-change optionality. All outward DTOs are camelCase via `to_camel`; the
+optionality and enums are the project's unique contract; compatibility changes
+must be additive and optional. All outward DTOs are camelCase via `to_camel`; the
 `ItineraryData` family stays snake_case (see `app.models.itinerary`).
 """
 
@@ -10,13 +10,24 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
+from app.ai.model_selection import DEFAULT_PLANNING_MODEL, PlanningModel
 from app.models.itinerary import ItineraryData
 
 # Outward enums (mirrored from the DB enum table & 1.4/1.5/1.7).
 RadarDimension = Literal["自然探索", "人文体验", "美食偏好", "慢节奏", "社交意愿"]
+VisualTheme = Literal[
+    "forest_light",
+    "ocean_blue",
+    "sunset_orange",
+    "museum_gold",
+    "city_neon",
+    "night_purple",
+    "snow_silver",
+    "desert_amber",
+]
 # Fixed radar dimension order for stable chart rendering.
 RADAR_DIMENSIONS: tuple[RadarDimension, ...] = (
     "自然探索",
@@ -69,6 +80,30 @@ class ReportChartPoint(CamelModel):
     value: int
 
 
+class ProfileSpectrum(CamelModel):
+    id: Literal["environment", "depth", "planning", "social"]
+    left_label: str
+    right_label: str
+    value: int
+
+
+class ProfileModule(CamelModel):
+    title: str
+    content: str
+
+
+class TravelProfileData(CamelModel):
+    archetype_id: str
+    archetype_name: str
+    persona_code: str
+    slogan: str
+    spectrums: list[ProfileSpectrum]
+    keywords: list[str]
+    modules: list[ProfileModule]
+    next_trip_inspiration: str
+    visual_theme: VisualTheme
+
+
 # —— 1.6 Report ——
 class Report(CamelModel):
     id: str
@@ -80,6 +115,8 @@ class Report(CamelModel):
     personality_summary: str
     content: str
     chart_data: list[ReportChartPoint]
+    profile_version: int | None = None
+    profile_data: TravelProfileData | None = None
 
 
 # —— 1.8 Plan —— (itineraryData stays snake_case)
@@ -151,11 +188,138 @@ class GenerateRequest(CamelModel):
     options: GenerateOptions
 
 
+PlanningPhase = Literal["collecting", "confirming", "completed"]
+PlanningMessageRole = Literal["user", "assistant"]
+PlanningChecklistStatus = Literal["ready", "assumed", "missing"]
+
+
+class PlanningChatMessage(CamelModel):
+    role: PlanningMessageRole
+    content: str
+    # Optional for backward compatibility. New clients stamp every real turn so
+    # the stateless endpoint can reject model switching inside one conversation.
+    planning_model: PlanningModel | None = None
+
+
+class PlanningBrief(CamelModel):
+    """Structured requirement state accumulated across planning chat turns."""
+
+    origin: str | None = None
+    destinations: list[str] = Field(default_factory=list)
+    start_date: str | None = None
+    end_date: str | None = None
+    traveler_count: int | None = None
+    budget: str | None = None
+    transport_preference: str | None = None
+    lodging_preference: str | None = None
+    interests: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    summary: str = ""
+    # Free-form leftovers the structured fields cannot carry: city order,
+    # morning/evening windows, party constraints, must-sees, etc. Shown on the
+    # confirmation checklist and re-injected verbatim into generation.
+    detail_requirements: str = ""
+
+    @field_validator(
+        "destinations", "interests", "constraints", "assumptions", mode="before"
+    )
+    @classmethod
+    def normalize_nullable_lists(cls, value):  # noqa: ANN001, ANN206
+        """Model-facing compatibility: JSON null means no accumulated items."""
+        return [] if value is None else value
+
+    @field_validator("summary", "detail_requirements", mode="before")
+    @classmethod
+    def normalize_nullable_summary(cls, value):  # noqa: ANN001, ANN206
+        return "" if value is None else value
+
+
+class PlanningChecklistItem(CamelModel):
+    key: str
+    label: str
+    value: str
+    status: PlanningChecklistStatus
+    required: bool
+
+
 class PlanningRequest(CamelModel):
     message: str
-    # First turn is null; later turns carry the full ItineraryData (snake_case).
-    context: ItineraryData | None
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL
+    # New plans collect requirements first. Existing plans may still be refined
+    # directly by passing context + confirmed=true.
+    context: ItineraryData | None = None
+    messages: list[PlanningChatMessage] = Field(default_factory=list)
+    brief: PlanningBrief | None = None
+    confirmed: bool = False
+    # Client-generated, optional. When present the backend publishes stage
+    # progress the client can poll while this request is still in flight.
+    progress_token: str | None = Field(default=None, max_length=64)
+
+
+class PlanningResponse(CamelModel):
+    phase: PlanningPhase
+    assistant_message: str
+    planning_model: PlanningModel
+    brief: PlanningBrief | None = None
+    checklist: list[PlanningChecklistItem] = Field(default_factory=list)
+    itinerary: ItineraryData | None = None
 
 
 class PlanSaveRequest(CamelModel):
     itinerary_data: ItineraryData
+
+
+# ============================================================
+# User-facing travel memory display
+# ============================================================
+
+
+class MemoryDisplayItem(CamelModel):
+    id: str
+    icon: str
+    title: str
+    content: str
+    planning_hint: str | None = None
+    source_labels: list[str] = Field(default_factory=list)
+    editable: bool = True
+
+
+class MemoryPlanningPreferenceField(CamelModel):
+    key: str
+    label: str
+    value: str = ""
+    placeholder: str
+    helper: str
+    editable: bool = True
+
+
+class TravelMemoryDisplay(CamelModel):
+    intro: str | None = None
+    overview_title: str | None = None
+    overview_content: str | None = None
+    planning_preferences: list[MemoryPlanningPreferenceField] = Field(default_factory=list)
+    memories: list[MemoryDisplayItem] = Field(default_factory=list)
+    editable: bool = True
+    updated_at: str | None = None
+    version: int
+    is_empty: bool = False
+
+
+class MemoryDescriptionUpdateRequest(CamelModel):
+    title: str
+    content: str
+
+
+class MemoryOverviewUpdateRequest(CamelModel):
+    title: str
+    content: str
+
+
+class MemoryPlanningPreferencesUpdateRequest(CamelModel):
+    transport: str = ""
+    hotel: str = ""
+    attractions: str = ""
+    food: str = ""
+    pace: str = ""
+    other: str = ""

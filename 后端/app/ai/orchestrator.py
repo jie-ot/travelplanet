@@ -11,42 +11,111 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
+import time
+import uuid
 from collections import Counter
 from collections.abc import Callable
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from app.ai import output_parser
+from app.ai import output_parser, planning_feasibility
 from app.ai.clients import vivo_chat_client, vivo_image_client
 from app.ai.clients.vivo_image_client import ImageGenerationResult
 from app.ai.memory import context_builder
+from app.ai.model_selection import (
+    DEFAULT_PLANNING_MODEL,
+    DEEPSEEK_PLANNING_MODELS,
+    PlanningModel,
+    requires_reasoning_replay,
+)
 from app.ai.prompts import load_prompt
 from app.ai.schemas import (
     MemoryUpdateResult,
     PhotoAnalysisItem,
     PhotoAnalysisResult,
+    PlanningIntakeResult,
     PostcardPlanItem,
     PostcardPlanResult,
     PostcardSelectionResult,
     ReportDraftResult,
 )
 from app.ai.tools import tool_specs
+from app.core import planning_progress
 from app.core.business_logging import call_in_current_context, log_event, timed_stage
 from app.core.config import settings
 from app.core.exceptions import AIGenerationError, ImageInputPolicyError
 from app.models.itinerary import ItineraryData
+from app.models.dto import PlanningBrief, PlanningChatMessage
 
 logger = logging.getLogger("travelplanet")
 
 # Planning function-calling loop bounds (defensive; tool execution is fast and
 # non-blocking, but the model must always converge to a final JSON answer).
+# Default research budget is 4 rounds; one extension covers critical gaps only.
 _MAX_TOOL_ROUNDS = 5
+_TARGET_TOOL_ROUNDS = 4
+_RESEARCH_REASONING_EFFORT = "low"
 _MAX_TOOL_CALLS_TOTAL = 75
+_MAX_INTAKE_TOOL_ROUNDS = 1
+_MAX_INTAKE_TOOL_CALLS_TOTAL = 8
+_INTAKE_REASONING_EFFORT = "low"
+# A full itinerary is ~12k tokens of JSON and a thinking model spends as much
+# again on reasoning first. At 16k the 2026-08-07 flash run twice hit
+# finish_reason=length with an empty message and had to be retried without
+# thinking, losing ~190s. The cap only bounds the response, so headroom is free.
+_MAX_GENERATION_TOKENS = 32000
+# Raw tool payloads from older rounds are the bulk of the research context, and
+# they are what made each round slower than the last (32s → 134s across six
+# rounds). They are also redundant: every fact is kept in `fact_registry` and
+# re-supplied in full for the final synthesis, so the history only has to record
+# what was already asked. The two most recent rounds stay verbatim, because the
+# model reasons over those results to choose its next queries.
+_VERBATIM_TOOL_HISTORY_ROUNDS = 2
+_TOOL_HISTORY_DIGEST_KEY = "compactedToolResult"
+_TOOL_HISTORY_DISCARDED_KEY = "historyDiscarded"
+# Marker embedded in confirmed_requirement_text; compaction must never rewrite
+# the user message that carries the confirmation checklist.
+_CONFIRMATION_CHECKLIST_MARKER = "【确认清单】"
+# Eleven enabled AMap endpoint buckets × the console-confirmed 3 QPS each. This
+# fills the purchased aggregate capacity without spawning one thread per call.
+_MAX_PARALLEL_EXTERNAL_TOOLS = 33
 _JSON_REPAIR_TIMEOUT_SECONDS = 60
 _PLAIN_FALLBACK_TIMEOUT_SECONDS = 90
+_MAX_FINAL_FACTS = 96
+_MAX_FINAL_FACTS_PER_QUERY = {
+    "amap_poi_search": 4,
+    "amap_poi_around": 4,
+    "amap_poi_detail": 10,
+    "amap_route": 1,
+    "amap_weather_range": 8,
+    "query_rail_tickets": 8,
+    "searchFlightItineraries": 8,
+    "searchFlightsTransferinfo": 6,
+    "searchFlightandTrainTransferinfo": 6,
+}
+_FINAL_FACT_DROP_KEYS = frozenset(
+    {
+        "polyline",
+        "photo_url",
+        "provider_payload",
+        "provider_raw_text",
+        "provider_parsed_content",
+    }
+)
+# Provider evidence that is worth keeping once per tool result but must not be
+# copied into every sibling candidate fact.
+_BULKY_CONTEXT_KEYS = frozenset(
+    {
+        "provider_summary_text",
+        "available_departure_datetimes",
+    }
+)
 PHOTO_ANALYZE_BATCH_SIZE = 5
 PHOTO_ANALYZE_SEMANTIC_MAX_RETRIES = 1
 
@@ -95,6 +164,220 @@ StructuredResultT = TypeVar("StructuredResultT", bound=BaseModel)
 
 class _PlanningFallbackExhausted(AIGenerationError):
     """The bounded same-context JSON recovery path has been exhausted."""
+
+
+def _execute_external_batch(
+    requests: dict[str, tuple[str, dict[str, Any]]],
+    execute_tool: ToolExecutor,
+    *,
+    max_total_attempts: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Run independent queries concurrently with per-query transient retries.
+
+    The key is normally the normalized cache key. AMap and independent
+    Tripmatch calls share the general worker pool; 12306 calls stay serial
+    because its persistent MCP session is not documented as concurrency-safe,
+    while still overlapping with the other providers. Retry budget is reserved
+    only for the query that failed; unrelated queries are never replayed.
+    """
+    if not requests:
+        return {}
+
+    max_attempts = max(1, settings.TOOL_MAX_RETRY + 1)
+    extra_attempts = (
+        None
+        if max_total_attempts is None
+        else max(0, max_total_attempts - len(requests))
+    )
+    retry_budget_lock = threading.Lock()
+
+    def reserve_retry() -> bool:
+        nonlocal extra_attempts
+        if extra_attempts is None:
+            return True
+        with retry_budget_lock:
+            if extra_attempts <= 0:
+                return False
+            extra_attempts -= 1
+            return True
+
+    def run_one(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        attempts = 0
+        for attempt in range(1, max_attempts + 1):
+            attempts = attempt
+            try:
+                result = execute_tool(tool_name, arguments)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "parallel planning tool failed (non-fatal): %s", tool_name
+                )
+                result = {
+                    "tool": tool_name,
+                    "status": "error",
+                    "message": "工具执行失败，请以官方渠道为准",
+                    "error_type": type(exc).__name__,
+                    "error_code": "tool_executor_exception",
+                    "retryable": _is_transient_exception(exc),
+                }
+            retryable, retry_reason = _classify_tool_retry(result)
+            result["retryable"] = retryable
+            if not retryable or attempt >= max_attempts or not reserve_retry():
+                break
+            log_event(
+                "planning_tool_point_retry",
+                status="scheduled",
+                tool_name=tool_name,
+                arguments=_summarize_planning_value(arguments),
+                failed_attempt=attempt,
+                max_attempts=max_attempts,
+                retry_reason=retry_reason,
+            )
+            time.sleep(min(0.5, 0.2 * attempt))
+        result["_attempt_count"] = attempts
+        planning_progress.add_tool_activity(
+            _tool_activity_label(tool_name, arguments, result),
+            count=attempts,
+        )
+        return result
+
+    general = {
+        key: item
+        for key, item in requests.items()
+        if item[0] != tool_specs.TOOL_QUERY_RAIL
+    }
+    rail = {
+        key: item
+        for key, item in requests.items()
+        if item[0] == tool_specs.TOOL_QUERY_RAIL
+    }
+    results: dict[str, dict[str, Any]] = {}
+    workers = max(1, min(_MAX_PARALLEL_EXTERNAL_TOOLS, len(general)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            key: pool.submit(call_in_current_context(run_one, tool_name, arguments))
+            for key, (tool_name, arguments) in general.items()
+        }
+        # Keep the MCP lane serial but execute it while AMap futures are running.
+        for key, (tool_name, arguments) in rail.items():
+            results[key] = run_one(tool_name, arguments)
+        for key, future in futures.items():
+            results[key] = future.result()
+    return results
+
+
+_ACTIVITY_TOOL_LABELS: dict[str, str] = {
+    tool_specs.TOOL_AMAP_WEATHER_RANGE: "天气",
+    tool_specs.TOOL_AMAP_POI_SEARCH: "地点",
+    tool_specs.TOOL_AMAP_POI_AROUND: "周边",
+    tool_specs.TOOL_AMAP_POI_DETAIL: "地点详情",
+    tool_specs.TOOL_AMAP_ROUTE: "路线",
+    tool_specs.TOOL_QUERY_RAIL: "火车票",
+    tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES: "航班",
+    tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER: "航班中转",
+    tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER: "空铁联运",
+}
+
+
+def _tool_activity_label(
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+) -> str:
+    """One short human sentence describing a finished query, for the UI."""
+    kind = _ACTIVITY_TOOL_LABELS.get(tool_name, tool_name)
+    origin = (
+        arguments.get("origin")
+        or arguments.get("depCityCode")
+        or arguments.get("depcity")
+    )
+    destination = (
+        arguments.get("destination")
+        or arguments.get("arrCityCode")
+        or arguments.get("arrcity")
+    )
+    if origin and destination:
+        subject = f"{origin}→{destination}"
+    else:
+        subject = str(
+            arguments.get("keyword")
+            or arguments.get("city")
+            or arguments.get("location")
+            or ""
+        )
+    when = str(
+        arguments.get("date")
+        or arguments.get("depDate")
+        or arguments.get("depdate")
+        or arguments.get("startDate")
+        or ""
+    )
+    status = str(result.get("status") or "")
+    suffix = "" if status in {"ok", "partial", ""} else "（未取到）"
+    parts = [part for part in (when[5:] if when else "", subject) if part]
+    return f"查询{kind} {' '.join(parts)}{suffix}".strip()
+
+
+def _is_transient_exception(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(
+        marker in name or marker in text
+        for marker in (
+            "timeout",
+            "connect",
+            "connection",
+            "ratelimit",
+            "rate_limit",
+            "temporar",
+            "429",
+            "502",
+            "503",
+            "504",
+        )
+    )
+
+
+def _classify_tool_retry(result: dict[str, Any]) -> tuple[bool, str]:
+    """Classify one structured tool result without retrying business misses."""
+    explicit = result.get("retryable")
+    error_code = str(result.get("error_code") or "").lower()
+    status = str(result.get("status") or "").lower()
+    http_status = result.get("http_status")
+    if explicit is not None:
+        return bool(explicit), error_code or status or "explicit"
+    if status == "timeout" or http_status == 429:
+        return True, error_code or status
+    if isinstance(http_status, int) and http_status >= 500:
+        return True, error_code or f"http_{http_status}"
+    transient_markers = (
+        "timeout",
+        "rate_limited",
+        "upstream_error",
+        "connection",
+        "temporar",
+        "warming_up",
+        "call_failed",
+        "startup_or_call_failed",
+    )
+    if any(marker in error_code for marker in transient_markers):
+        return True, error_code
+    return False, error_code or status or "not_retryable"
+
+
+def _cacheable_tool_result(result: dict[str, Any]) -> bool:
+    """Transient failures must not poison the same-request query cache."""
+    retryable, _ = _classify_tool_retry(result)
+    return not retryable
+
+
+def _tool_result_has_usable_fact(result: dict[str, Any]) -> bool:
+    context = result.get("result_context")
+    context_status = context.get("status") if isinstance(context, dict) else None
+    return str(result.get("status") or context_status or "").lower() in {
+        "ok",
+        "needs_official_confirmation",
+    }
 
 
 def analyze_photos(
@@ -844,17 +1127,18 @@ def plan_itinerary(
     memory_summary: str,
     fact_pack: dict[str, Any] | None = None,
     execute_tool: ToolExecutor | None = None,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
 ) -> ItineraryData:
     """Planning → full ItineraryData.
 
     With `execute_tool`, run a bounded function-calling loop so the model can
-    choose whitelist tools (高德 weather/POI/route, 12306 rail, flight) and
+    choose the model-specific whitelist tools and
     synthesize the itinerary from returned facts. The orchestrator intercepts
     each function call and routes it through the injected executor (which
     validates + executes via travel_fact_service). Falls back to the plain JSON
     path with the baseline fact pack on any function-calling failure.
     """
-    system_prompt = _load_planning_system_prompt()
+    planning_progress.report("understanding_request", planning_model=planning_model)
     user_text = context_builder.build_planning_user_text(
         message=message,
         context=context,
@@ -862,175 +1146,1975 @@ def plan_itinerary(
         fact_pack=fact_pack,
     )
     if execute_tool is not None:
-        try:
-            return _plan_with_tools(system_prompt, user_text, execute_tool)
-        except _PlanningFallbackExhausted:
-            raise
-        except AIGenerationError:
-            logger.info(
-                "planning function-calling path failed; falling back to plain JSON path"
-            )
+        return _plan_with_tools(
+            user_text,
+            execute_tool,
+            planning_model=planning_model,
+        )
 
-    return _plan_plain(system_prompt, user_text)
+    # No-tools fallback synthesizes JSON directly: omit research-only tool rules.
+    return _plan_plain(
+        _load_planning_prompt(planning_model, include_tools=False),
+        user_text,
+        planning_model=planning_model,
+    )
 
 
-def _load_planning_system_prompt() -> str:
-    """Load planning contract and quality skill as one system prompt."""
+def _load_planning_prompt(
+    planning_model: PlanningModel,
+    *,
+    include_tools: bool,
+) -> str:
+    """Assemble planning system prompt for research or final generation.
+
+    Research (`include_tools=True`): contract → tool workflow → skill, plus
+    DeepSeek flight rules when applicable.
+    Generation/repair (`include_tools=False`): contract → skill only (no
+    declare/finish/tool-discipline chapters). DeepSeek daily-map rules stay on
+    both paths because they constrain final JSON fields.
+    """
     current_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-    return (
+    prompt = (
         f"【当前日期】\n今天是 {current_date}（北京时间）。"
         "用户的日期表达可能较为模糊，请根据当前日期和用户需求推断具体行程日期；"
         "需要推断时，推断结果不得早于今天。\n\n"
         "【planning_system.md：必须遵守的契约】\n"
         + load_prompt("planning_system.md")
-        + "\n\n【planning_skill.md：好旅行规划的标准】\n"
+    )
+    if include_tools:
+        # Research order mirrors the former monolith: contract/workflow first,
+        # then quality skill; DeepSeek flight rules remain after skill.
+        prompt += (
+            "\n\n【planning_tools.md：研究阶段工具调用准则】\n"
+            + load_prompt("planning_tools.md")
+        )
+    prompt += (
+        "\n\n【planning_skill.md：好旅行规划的标准】\n"
         + load_prompt("planning_skill.md")
+    )
+    if planning_model in DEEPSEEK_PLANNING_MODELS:
+        if include_tools:
+            prompt += (
+                "\n\n【DeepSeek 专属航班工具规则】\n"
+                + load_prompt("planning_flight_tools_deepseek.md")
+            )
+        prompt += (
+            "\n\n【DeepSeek 专属每日游玩地图标注】\n"
+            + load_prompt("planning_daily_map_deepseek.md")
+        )
+    return prompt
+
+
+def _assistant_history_message(
+    turn: vivo_chat_client.ChatTurn,
+    planning_model: PlanningModel,
+) -> dict[str, Any]:
+    """Serialize an assistant turn for the next provider request.
+
+    DeepSeek requires the complete `reasoning_content` to be replayed after
+    every request carrying tools. The field remains provider-only: it is never
+    logged as text, persisted, or returned through application DTOs.
+    """
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": turn.content,
+    }
+    if turn.tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.name, "arguments": tc.arguments},
+            }
+            for tc in turn.tool_calls
+        ]
+    if requires_reasoning_replay(planning_model):
+        message["reasoning_content"] = turn.reasoning_content or ""
+    return message
+
+
+def _compact_tool_history(
+    messages: list[dict[str, Any]],
+    cutoff_index: int,
+    *,
+    retained_fact_ids: set[str] | None = None,
+) -> dict[str, int] | None:
+    """Digest or discard tool results older than the cutoff, in place.
+
+    - Retained / not-yet-selected facts shrink to a digest (tool + status + ids).
+    - Facts the model has already deselected via update_planning_fact_state are
+      dropped entirely: their payloads are confirmed unused for the plan.
+    - System / user / assistant turns are never rewritten. In particular the
+      confirmation checklist user message must survive every research round.
+    """
+    digested = 0
+    discarded = 0
+    chars_saved = 0
+    for message in messages[:cutoff_index]:
+        role = message.get("role")
+        if role != "tool":
+            # Checklist and other requirement text live on the user turn.
+            continue
+        content = message.get("content") or ""
+        if (
+            _TOOL_HISTORY_DIGEST_KEY in content
+            or _TOOL_HISTORY_DISCARDED_KEY in content
+        ):
+            continue
+        fact_ids = _fact_ids_from_tool_content(content)
+        if retained_fact_ids is not None and fact_ids and not (
+            set(fact_ids) & retained_fact_ids
+        ):
+            replacement = _tool_history_discard(content)
+            if replacement is None or len(replacement) >= len(content):
+                continue
+            discarded += 1
+            chars_saved += len(content) - len(replacement)
+            message["content"] = replacement
+            continue
+        digest = _tool_history_digest(content)
+        if digest is None or len(digest) >= len(content):
+            continue
+        digested += 1
+        chars_saved += len(content) - len(digest)
+        message["content"] = digest
+    if not digested and not discarded:
+        return None
+    return {
+        "messages": digested + discarded,
+        "digested": digested,
+        "discarded": discarded,
+        "chars_saved": chars_saved,
+    }
+
+
+def _tool_history_digest(content: str) -> str | None:
+    """One line standing in for a still-useful tool result, or None."""
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    fact_ids = _fact_ids_within(payload)
+    return json.dumps(
+        {
+            _TOOL_HISTORY_DIGEST_KEY: True,
+            "tool": payload.get("tool"),
+            "status": payload.get("status"),
+            "factIds": fact_ids[:24],
+            "factCount": len(fact_ids),
+            "note": "此前轮次的详情已归档，最终编排会提供完整事实，无需重复查询",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _tool_history_discard(content: str) -> str | None:
+    """Stub for a tool result the model has already marked unused."""
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return json.dumps(
+        {
+            _TOOL_HISTORY_DISCARDED_KEY: True,
+            "tool": payload.get("tool"),
+            "status": payload.get("status"),
+            "note": "该查询结果未被选入保留事实，详情已丢弃",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _fact_ids_from_tool_content(content: str) -> list[str]:
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return []
+    return _fact_ids_within(payload) if isinstance(payload, dict) else []
+
+
+def _fact_ids_within(node: Any) -> list[str]:
+    """Every fact id in a tool result, top level or nested in its items."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        fact_id = node.get("fact_id")
+        if isinstance(fact_id, str):
+            found.append(fact_id)
+        for value in node.values():
+            found.extend(_fact_ids_within(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_fact_ids_within(item))
+    return list(dict.fromkeys(found))
+
+
+def _ensure_confirmation_checklist_preserved(
+    messages: list[dict[str, Any]],
+    user_text: str,
+) -> None:
+    """If compaction ever lost the checklist user turn, put it back.
+
+    Research only digests tool roles today, but the checklist is the one piece of
+    context that must survive every round — without it the model plans from
+    destinations and dates alone.
+    """
+    if _CONFIRMATION_CHECKLIST_MARKER not in user_text:
+        return
+    for message in messages:
+        if (
+            message.get("role") == "user"
+            and _CONFIRMATION_CHECKLIST_MARKER in (message.get("content") or "")
+        ):
+            return
+    messages.insert(1, {"role": "user", "content": user_text})
+    log_event(
+        "planning_confirmation_checklist_restored",
+        status="restored",
+        reason="missing_after_compaction",
     )
 
 
 def _plan_with_tools(
-    system_prompt: str, user_text: str, execute_tool: ToolExecutor
+    user_text: str,
+    execute_tool: ToolExecutor,
+    *,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
 ) -> ItineraryData:
-    """Bounded function-calling loop; the model drives whitelist tool selection."""
+    """Research protocol: declare scope → gather/select facts → finish → final + audit."""
+    research_prompt = _load_planning_prompt(planning_model, include_tools=True)
+    generation_prompt = _load_planning_prompt(planning_model, include_tools=False)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": research_prompt},
         {"role": "user", "content": user_text},
     ]
-    total_calls = 0
-    for round_idx in range(_MAX_TOOL_ROUNDS):
-        log_event("planning_tool_round", round=round_idx + 1, total_calls=total_calls)
+    scope: dict[str, Any] | None = None
+    research_summary: dict[str, Any] | None = None
+    fact_registry: dict[str, dict[str, Any]] = {}
+    retained_facts: dict[str, dict[str, Any]] = {}
+    result_cache: dict[str, dict[str, Any]] = {}
+    remaining_queries: list[str] = []
+    external_calls = 0
+    planning_tools = tool_specs.planning_tools_for_model(planning_model)
+    allowed_external_tool_names = tool_specs.external_tool_names_for_model(
+        planning_model
+    )
+    # Research depth is identical for every planning model. DeepSeek used to run
+    # a 2/4-round "fast path", which force-closed research before the model had
+    # verified routes or called finish_research, so the final JSON was
+    # synthesized from an incomplete fact set.
+    target_rounds = _TARGET_TOOL_ROUNDS
+    max_rounds = _MAX_TOOL_ROUNDS
+    active_round_limit = target_rounds
+    forced_close_reason = "target_rounds_complete"
+
+    round_start_indexes: list[int] = []
+
+    for round_idx in range(max_rounds):
+        if round_idx >= active_round_limit:
+            break
+        round_start_indexes.append(len(messages))
+        if round_idx > _VERBATIM_TOOL_HISTORY_ROUNDS:
+            compacted = _compact_tool_history(
+                messages,
+                round_start_indexes[round_idx - _VERBATIM_TOOL_HISTORY_ROUNDS],
+                retained_fact_ids=(
+                    set(retained_facts) if retained_facts else None
+                ),
+            )
+            if compacted:
+                log_event(
+                    "planning_tool_history_compacted",
+                    status="applied",
+                    round=round_idx + 1,
+                    digested_messages=compacted["messages"],
+                    digested=compacted.get("digested"),
+                    discarded=compacted.get("discarded"),
+                    chars_saved=compacted["chars_saved"],
+                    planning_model=planning_model,
+                )
+            _ensure_confirmation_checklist_preserved(messages, user_text)
+        planning_progress.report(
+            "researching",
+            research_round=round_idx + 1,
+            target_rounds=active_round_limit,
+            max_rounds=max_rounds,
+            fact_count=len(fact_registry) or None,
+            detail=(
+                f"第 {round_idx + 1}/{active_round_limit} 轮事实检索"
+            ),
+        )
+        log_event(
+            "planning_tool_round",
+            round=round_idx + 1,
+            target_rounds=target_rounds,
+            max_rounds=max_rounds,
+            active_round_limit=active_round_limit,
+            remaining_rounds_including_current=active_round_limit - round_idx,
+            total_calls=external_calls,
+            max_external_calls=_MAX_TOOL_CALLS_TOTAL,
+            message_count=len(messages),
+            scope_declared=scope is not None,
+            fact_registry_count=len(fact_registry),
+            retained_fact_count=len(retained_facts),
+            remaining_query_count=len(remaining_queries),
+            remaining_queries=remaining_queries,
+            cache_entry_count=len(result_cache),
+            research_finished=research_summary is not None,
+            planning_model=planning_model,
+        )
         turn = vivo_chat_client.chat_messages(
             messages=messages,
-            tools=tool_specs.PLANNING_TOOLS,
-            max_completion_tokens=16000,
+            tools=planning_tools,
+            stage="planning_research",
+            max_completion_tokens=_MAX_GENERATION_TOKENS,
+            planning_model=planning_model,
+            # DeepSeek keeps its provider default (high); Doubao research stays low.
+            reasoning_effort=(
+                "high"
+                if planning_model in DEEPSEEK_PLANNING_MODELS
+                else _RESEARCH_REASONING_EFFORT
+            ),
         )
-        if turn.tool_calls:
-            remaining_calls = max(0, _MAX_TOOL_CALLS_TOTAL - total_calls)
-            executable_calls = turn.tool_calls[:remaining_calls]
-            skipped_calls = turn.tool_calls[remaining_calls:]
-            log_event(
-                "planning_tool_round_result",
-                status="tool_calls",
-                round=round_idx + 1,
-                tool_calls=len(turn.tool_calls),
-                executable_calls=len(executable_calls),
-                skipped_calls=len(skipped_calls),
-                assistant_content_excerpt=_excerpt(turn.content),
+        log_event(
+            "planning_tool_round_result",
+            status="tool_calls" if turn.tool_calls else "premature_content",
+            round=round_idx + 1,
+            remaining_rounds=active_round_limit - round_idx - 1,
+            tool_call_count=len(turn.tool_calls),
+            tool_names=[tc.name for tc in turn.tool_calls],
+            internal_tool_count=sum(
+                _planning_tool_kind(tc.name, allowed_external_tool_names) == "internal"
+                for tc in turn.tool_calls
+            ),
+            external_tool_count=sum(
+                tc.name in allowed_external_tool_names for tc in turn.tool_calls
+            ),
+            content_chars=len(turn.content or ""),
+            content_excerpt=_excerpt(turn.content or ""),
+            scope_declared=scope is not None,
+            fact_registry_count=len(fact_registry),
+            retained_fact_count=len(retained_facts),
+            remaining_query_count=len(remaining_queries),
+            planning_model=planning_model,
+        )
+        if not turn.tool_calls:
+            messages.append(_assistant_history_message(turn, planning_model))
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "研究尚未通过 finish_research 结束，提前输出的行程不会被接受。"
+                        "请继续调用所需工具；信息足够后先调用 finish_research。"
+                    ),
+                }
             )
-            if not executable_calls:
+            continue
+
+        external_in_turn = any(
+            tc.name in allowed_external_tool_names for tc in turn.tool_calls
+        )
+        messages.append(_assistant_history_message(turn, planning_model))
+        parsed_calls = [(tc, _safe_json_args(tc.arguments)) for tc in turn.tool_calls]
+        allowed_external_ids: set[str] = set()
+        batch_requests: dict[str, tuple[str, dict[str, Any]]] = {}
+        new_request_keys: set[str] = set()
+        for tc, args in parsed_calls:
+            if tc.name not in allowed_external_tool_names:
+                continue
+            cache_key = _planning_tool_cache_key(tc.name, args)
+            if cache_key in result_cache or cache_key in batch_requests:
+                allowed_external_ids.add(tc.id)
+                continue
+            if external_calls + len(new_request_keys) >= _MAX_TOOL_CALLS_TOTAL:
+                continue
+            allowed_external_ids.add(tc.id)
+            new_request_keys.add(cache_key)
+            batch_requests[cache_key] = (tc.name, args)
+        parallel_results = _execute_external_batch(
+            batch_requests,
+            execute_tool,
+            max_total_attempts=max(0, _MAX_TOOL_CALLS_TOTAL - external_calls),
+        )
+        external_calls += sum(
+            int(result.get("_attempt_count") or 0)
+            for result in parallel_results.values()
+        )
+        called_names: list[str] = []
+        turn_issued_fact_count = 0
+        fact_state_updated = False
+        for call_index, (tc, args) in enumerate(parsed_calls, start=1):
+            called_names.append(tc.name)
+            tool_kind = _planning_tool_kind(tc.name, allowed_external_tool_names)
+            cache_hit = False
+            unknown_ids: list[str] = []
+            fact_ids_before = set(fact_registry)
+            log_event(
+                "planning_execute_tool",
+                status="start",
+                round=round_idx + 1,
+                call_index=call_index,
+                tool_name=tc.name,
+                tool_kind=tool_kind,
+                arguments=_summarize_planning_value(args),
+                external_calls_before=external_calls,
+                fact_registry_count=len(fact_registry),
+                retained_fact_count=len(retained_facts),
+            )
+            result: dict[str, Any]
+            if tc.name == tool_specs.TOOL_DECLARE_TRIP_SCOPE:
+                try:
+                    parsed_scope = tool_specs.DeclareTripScopeArgs.model_validate(args)
+                    scope = parsed_scope.model_dump(by_alias=True)
+                    result = {"tool": tc.name, "status": "ok", "saved": scope}
+                except ValidationError as exc:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": f"旅行范围参数不合法：{exc.errors()[:1]}",
+                    }
+            elif tc.name == tool_specs.TOOL_UPDATE_PLANNING_FACT_STATE:
+                try:
+                    state = tool_specs.PlanningFactStateArgs.model_validate(args)
+                    unknown_ids = [
+                        fact_id
+                        for fact_id in state.selected_fact_ids
+                        if fact_id not in fact_registry
+                    ]
+                    retained_facts = {
+                        fact_id: fact_registry[fact_id]
+                        for fact_id in state.selected_fact_ids
+                        if fact_id in fact_registry
+                    }
+                    remaining_queries = state.remaining_queries
+                    # Once the model names what it is keeping, everything else is
+                    # confirmed unused and can leave the prompt entirely.
+                    discarded = _compact_tool_history(
+                        messages,
+                        len(messages),
+                        retained_fact_ids=set(retained_facts),
+                    )
+                    if discarded and discarded.get("discarded"):
+                        log_event(
+                            "planning_tool_history_compacted",
+                            status="discarded_unused",
+                            discarded=discarded["discarded"],
+                            chars_saved=discarded["chars_saved"],
+                            retained_fact_count=len(retained_facts),
+                            planning_model=planning_model,
+                        )
+                    _ensure_confirmation_checklist_preserved(messages, user_text)
+                    fact_state_updated = True
+                    result = {
+                        "tool": tc.name,
+                        "status": "ok" if not unknown_ids else "partial",
+                        "retainedFactIds": list(retained_facts),
+                        "unknownFactIds": unknown_ids,
+                        "remainingQueries": remaining_queries,
+                    }
+                except ValidationError as exc:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": f"事实状态参数不合法：{exc.errors()[:1]}",
+                    }
+            elif tc.name == tool_specs.TOOL_FINISH_RESEARCH:
+                try:
+                    finish = tool_specs.FinishResearchArgs.model_validate(args)
+                    if scope is None:
+                        result = {
+                            "tool": tc.name,
+                            "status": "error",
+                            "message": "必须先调用 declare_trip_scope",
+                        }
+                    elif external_in_turn:
+                        result = {
+                            "tool": tc.name,
+                            "status": "error",
+                            "message": "本轮仍有外部查询；请读取结果后下一轮再结束研究",
+                        }
+                    else:
+                        finish_gaps = _critical_research_gaps(
+                            scope=scope,
+                            remaining_queries=remaining_queries,
+                            fact_registry=fact_registry,
+                        )
+                        if finish_gaps and round_idx + 1 < max_rounds:
+                            remaining_queries = list(
+                                dict.fromkeys([*remaining_queries, *finish_gaps])
+                            )
+                            result = {
+                                "tool": tc.name,
+                                "status": "error",
+                                "message": "关键事实仍缺失，请只补查后再结束研究",
+                                "criticalGaps": finish_gaps,
+                            }
+                        else:
+                            research_summary = finish.model_dump()
+                            result = {
+                                "tool": tc.name,
+                                "status": "ok",
+                                "toolsClosed": True,
+                            }
+                except ValidationError as exc:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": f"研究总结参数不合法：{exc.errors()[:1]}",
+                    }
+            elif tc.name in allowed_external_tool_names:
+                if tc.id not in allowed_external_ids:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": "已达到外部工具调用总上限",
+                    }
+                else:
+                    cache_key = _planning_tool_cache_key(tc.name, args)
+                    cached = result_cache.get(cache_key)
+                    if cached is not None:
+                        cache_hit = True
+                        result = deepcopy(cached)
+                        result["cached"] = True
+                    else:
+                        result = deepcopy(parallel_results[cache_key])
+                        result.pop("_attempt_count", None)
+                        retryable, _ = _classify_tool_retry(result)
+                        if _tool_result_has_usable_fact(result) and not retryable:
+                            result = _register_planning_facts(
+                                tool_name=tc.name,
+                                arguments=args,
+                                result=result,
+                                registry=fact_registry,
+                            )
+                        if _cacheable_tool_result(result):
+                            result_cache[cache_key] = deepcopy(result)
+            else:
+                result = {
+                    "tool": tc.name,
+                    "status": "error",
+                    "message": "工具不在本轮规划白名单中",
+                }
+
+            issued_fact_ids = sorted(set(fact_registry) - fact_ids_before)
+            turn_issued_fact_count += len(issued_fact_ids)
+            log_event(
+                "planning_execute_tool",
+                status=str(result.get("status") or "unknown"),
+                round=round_idx + 1,
+                call_index=call_index,
+                tool_name=tc.name,
+                tool_kind=tool_kind,
+                cache_hit=cache_hit,
+                arguments=args,
+                result=result,
+                issued_fact_count=len(issued_fact_ids),
+                issued_fact_ids=issued_fact_ids,
+                external_calls=external_calls,
+                scope_summary=_summarize_planning_value(scope),
+                fact_registry_count=len(fact_registry),
+                retained_fact_count=len(retained_facts),
+                retained_fact_ids=list(retained_facts),
+                unknown_fact_ids=unknown_ids,
+                remaining_queries=remaining_queries,
+                research_finished=research_summary is not None,
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(
+                        _compact_planning_fact_value(result),
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+
+        if research_summary is not None:
+            break
+        completed_rounds = round_idx + 1
+        if completed_rounds == target_rounds:
+            critical_gaps = _critical_research_gaps(
+                scope=scope,
+                remaining_queries=remaining_queries,
+                fact_registry=fact_registry,
+            )
+            if (
+                critical_gaps
+                and external_calls < _MAX_TOOL_CALLS_TOTAL
+            ):
+                active_round_limit = max_rounds
+                forced_close_reason = "max_rounds_reached_with_critical_gaps"
+                log_event(
+                    "planning_research_rounds_extended",
+                    status="success",
+                    completed_rounds=completed_rounds,
+                    previous_limit=target_rounds,
+                    extended_limit=max_rounds,
+                    critical_gaps=critical_gaps,
+                    external_calls=external_calls,
+                    planning_model=planning_model,
+                )
                 messages.append(
                     {
                         "role": "user",
-                        "content": "已达到本次规划的工具调用总上限，请停止调用工具，"
-                        "基于已有事实输出完整 ItineraryData JSON。",
+                        "content": (
+                            f"默认 {target_rounds} 轮研究已完成，但以下关键事实仍缺失，"
+                            f"因此允许再补充 1 轮到共 {max_rounds} 轮："
+                            f"{'; '.join(critical_gaps)}。"
+                            "请只补查这些关键缺口；读完结果后调用 "
+                            "update_planning_fact_state 只保留会用到的事实，"
+                            "然后立即调用 finish_research。"
+                        ),
                     }
                 )
-                break
+            else:
+                forced_close_reason = (
+                    "tool_call_budget_exhausted"
+                    if external_calls >= _MAX_TOOL_CALLS_TOTAL
+                    else "target_rounds_complete"
+                )
+        remaining_rounds = active_round_limit - round_idx - 1
+        if turn_issued_fact_count > 0 and not fact_state_updated:
             messages.append(
                 {
-                    "role": "assistant",
-                    "content": turn.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.name, "arguments": tc.arguments},
-                        }
-                        for tc in executable_calls
-                    ],
+                    "role": "user",
+                    "content": (
+                        f"本轮已调用：{', '.join(called_names)}，"
+                        f"新产生 {turn_issued_fact_count} 条事实。"
+                        "请立即调用 update_planning_fact_state，"
+                        "用 selectedFactIds 只保留后续行程会用到的事实，"
+                        "不要保留明显不会采用的候选；未选中的结果会从上下文删除。"
+                        "信息已够时可在同一轮再调用 finish_research；"
+                        f"否则继续并行补查。还剩 {remaining_rounds} 个研究轮次，"
+                        f"已执行 {external_calls} 次外部调用。"
+                        "默认目标是 4 轮，够了就结束，不要为凑轮次继续查。"
+                    ),
                 }
             )
-            for tc in executable_calls:
-                if total_calls >= _MAX_TOOL_CALLS_TOTAL:
-                    break
-                args = _safe_json_args(tc.arguments)
-                total_calls += 1
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"本轮已调用：{', '.join(called_names)}。"
+                        f"还剩 {remaining_rounds} 个研究轮次，已执行 {external_calls} 次外部调用。"
+                        "互不依赖的查询尽量同轮并行；"
+                        "读完新事实后用 update_planning_fact_state 只保留会用到的，"
+                        "丢弃不会采用的候选。关键事实齐全就调用 finish_research，"
+                        "不要为凑满轮次继续查询。"
+                    ),
+                }
+            )
+
+    if scope is None:
+        raise AIGenerationError("行程规划生成失败：模型未声明旅行范围")
+    if research_summary is None:
+        if not fact_registry:
+            raise AIGenerationError("行程规划生成失败：模型未调用 finish_research")
+        research_summary = {
+            "completed": [
+                f"已取得 {len(fact_registry)} 条工具事实",
+                f"已执行 {external_calls} 次外部工具调用",
+            ],
+            "unresolved": remaining_queries,
+            "outline": [],
+            "forcedClose": True,
+            "reason": "达到研究轮次上限，编排器关闭工具并进入结构化生成",
+        }
+        log_event(
+            "planning_research_forced_close",
+            status="success",
+            reason=forced_close_reason,
+            target_rounds=target_rounds,
+            max_rounds=max_rounds,
+            external_calls=external_calls,
+            fact_registry_count=len(fact_registry),
+            retained_fact_count=len(retained_facts),
+            remaining_queries=remaining_queries,
+            planning_model=planning_model,
+        )
+
+    planning_progress.report(
+        "selecting_facts",
+        fact_count=len(fact_registry) or None,
+        detail=f"已取得 {len(fact_registry)} 条工具事实",
+    )
+    retained_facts = _select_planning_facts_for_final(
+        retained_facts or fact_registry
+    )
+    planning_progress.report(
+        "synthesizing",
+        fact_count=len(retained_facts) or None,
+        detail=f"依据 {len(retained_facts)} 条事实编排行程",
+    )
+    final_data = _generate_itinerary_from_research(
+        system_prompt=generation_prompt,
+        user_text=user_text,
+        scope=scope,
+        retained_facts=retained_facts,
+        research_summary=research_summary,
+        stage="planning_final",
+        planning_model=planning_model,
+    )
+    # An advisory LLM audit used to run here and could trigger a full
+    # regeneration, costing 3–7 minutes for a second opinion on requirement
+    # coverage and pacing. Truthfulness — the part that makes a plan unusable —
+    # is enforced deterministically below and needs no model round, so the audit
+    # was removed rather than kept as the single largest cost in the pipeline.
+    planning_progress.report("verifying")
+    return _repair_itinerary_violations(
+        system_prompt=generation_prompt,
+        user_text=user_text,
+        itinerary=final_data,
+        retained_facts=retained_facts,
+        planning_model=planning_model,
+    )
+
+
+def collect_planning_requirements(
+    *,
+    messages: list[PlanningChatMessage],
+    previous_brief: PlanningBrief | None,
+    memory_summary: str,
+    execute_tool: ToolExecutor | None = None,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
+) -> PlanningIntakeResult:
+    """Run one intake turn, optionally using bounded read-only travel tools."""
+    current_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    system_prompt = (
+        f"【当前日期】\n今天是 {current_date}（北京时间）。\n\n"
+        + load_prompt("planning_intake_system.md")
+    )
+    bounded_messages = [
+        {
+            "role": message.role,
+            "content": message.content.strip()[:1600],
+        }
+        for message in messages[-16:]
+        if message.content.strip()
+    ]
+    user_text = json.dumps(
+        {
+            "memorySummary": memory_summary[:1600],
+            "previousBrief": (
+                previous_brief.model_dump(by_alias=True)
+                if previous_brief is not None
+                else None
+            ),
+            "conversation": bounded_messages,
+        },
+        ensure_ascii=False,
+    )
+    if execute_tool is None:
+        with timed_stage(
+            "planning_intake_model",
+            conversation_turns=len(bounded_messages),
+            has_previous_brief=previous_brief is not None,
+            tools_enabled=False,
+            planning_model=planning_model,
+        ):
+            raw = vivo_chat_client.chat_json(
+                task=vivo_chat_client.TASK_PLANNING_INTAKE,
+                system_prompt=system_prompt,
+                user_text=user_text,
+                temperature=0.2,
+                max_completion_tokens=3000,
+                planning_model=planning_model,
+            )
+        return output_parser.parse_model_json(raw, PlanningIntakeResult)
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"{user_text}\n\n本阶段只抽取和确认旅行需求，可按需并行调用最多 1 轮"
+                "只读旅行工具辅助确认；工具结束后输出完整 PlanningIntakeResult JSON。"
+            ),
+        },
+    ]
+    intake_tools = tool_specs.planning_intake_tools_for_model(planning_model)
+    allowed_intake_tool_names = tool_specs.external_tool_names_for_model(
+        planning_model
+    )
+    tool_calls = 0
+    intake_cache: dict[str, dict[str, Any]] = {}
+    with timed_stage(
+        "planning_intake_model",
+        conversation_turns=len(bounded_messages),
+        has_previous_brief=previous_brief is not None,
+        tools_enabled=True,
+        intake_tool_rounds=_MAX_INTAKE_TOOL_ROUNDS,
+        planning_model=planning_model,
+    ):
+        for round_idx in range(_MAX_INTAKE_TOOL_ROUNDS):
+            turn = vivo_chat_client.chat_messages(
+                messages=messages,
+                tools=intake_tools,
+                stage="planning_intake",
+                temperature=0.2,
+                max_completion_tokens=3000,
+                planning_model=planning_model,
+                reasoning_effort=_INTAKE_REASONING_EFFORT,
+            )
+            if not turn.tool_calls:
+                if not turn.content:
+                    raise AIGenerationError("旅行需求沟通失败：模型未返回内容")
+                try:
+                    return output_parser.parse_model_json(
+                        turn.content,
+                        PlanningIntakeResult,
+                    )
+                except AIGenerationError as exc:
+                    log_event(
+                        "planning_intake_json_repair",
+                        status="start",
+                        round=round_idx + 1,
+                        reason=exc.message,
+                        invalid_content_chars=len(turn.content),
+                        invalid_content_excerpt=_excerpt(turn.content),
+                    )
+                    messages.append(_assistant_history_message(turn, planning_model))
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "上一条回复不是约定的 JSON。请把上一条给用户的完整答复原样保留在 "
+                                "assistantMessage 中，并依据系统提示补全累计 brief；只输出一个 JSON 对象，"
+                                "不要 Markdown、代码围栏或额外说明。"
+                            ),
+                        }
+                    )
+                    repaired = vivo_chat_client.chat_messages(
+                        messages=messages,
+                        tools=None,
+                        stage="planning_intake_json_repair",
+                        temperature=0.0,
+                        max_completion_tokens=4000,
+                        planning_model=planning_model,
+                        response_format=(
+                            {"type": "json_object"}
+                            if planning_model in DEEPSEEK_PLANNING_MODELS
+                            else None
+                        ),
+                        reasoning_effort=_INTAKE_REASONING_EFFORT,
+                    )
+                    if repaired.tool_calls or not repaired.content:
+                        raise AIGenerationError("旅行需求沟通失败：JSON 修复未返回内容")
+                    parsed = output_parser.parse_model_json(
+                        repaired.content,
+                        PlanningIntakeResult,
+                    )
+                    log_event(
+                        "planning_intake_json_repair",
+                        status="success",
+                        repaired_content_chars=len(repaired.content),
+                    )
+                    return parsed
+
+            messages.append(_assistant_history_message(turn, planning_model))
+            parsed_calls = [(tc, _safe_json_args(tc.arguments)) for tc in turn.tool_calls]
+            allowed_external_ids: set[str] = set()
+            batch_requests: dict[str, tuple[str, dict[str, Any]]] = {}
+            reserved_calls = 0
+            for tc, args in parsed_calls:
+                if tc.name not in allowed_intake_tool_names:
+                    continue
+                if tool_calls + reserved_calls >= _MAX_INTAKE_TOOL_CALLS_TOTAL:
+                    continue
+                reserved_calls += 1
+                allowed_external_ids.add(tc.id)
+                cache_key = _planning_tool_cache_key(tc.name, args)
+                if cache_key not in intake_cache and cache_key not in batch_requests:
+                    batch_requests[cache_key] = (tc.name, args)
+            parallel_results = _execute_external_batch(batch_requests, execute_tool)
+            tool_calls += reserved_calls
+            for tc, args in parsed_calls:
+                if tc.name not in allowed_intake_tool_names:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": "工具不在需求沟通阶段白名单中",
+                    }
+                elif tc.id not in allowed_external_ids:
+                    result = {
+                        "tool": tc.name,
+                        "status": "error",
+                        "message": "已达到需求沟通阶段工具调用上限",
+                    }
+                else:
+                    cache_key = _planning_tool_cache_key(tc.name, args)
+                    cached = intake_cache.get(cache_key)
+                    if cached is not None:
+                        result = deepcopy(cached)
+                        result["cached"] = True
+                    else:
+                        result = deepcopy(parallel_results[cache_key])
+                        intake_cache[cache_key] = deepcopy(result)
                 log_event(
-                    "planning_execute_tool",
-                    status="start",
+                    "planning_intake_execute_tool",
+                    status=str(result.get("status") or "unknown"),
+                    round=round_idx + 1,
                     tool_name=tc.name,
-                    total_calls=total_calls,
-                )
-                result = execute_tool(tc.name, args)
-                log_event(
-                    "planning_execute_tool",
-                    status=result.get("status", "unknown"),
-                    tool_name=tc.name,
+                    arguments=args,
+                    result=result,
+                    total_calls=tool_calls,
                 )
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": json.dumps(result, ensure_ascii=False),
+                        "content": json.dumps(
+                            _compact_planning_fact_value(result),
+                            ensure_ascii=False,
+                        ),
                     }
                 )
-            if skipped_calls:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"已达到工具调用总上限（{_MAX_TOOL_CALLS_TOTAL} 次），"
-                        "本轮剩余工具调用已截断；请基于已返回事实继续或输出最终 JSON。",
-                    }
-                )
-            continue
-        # No (further) tool calls: this should be the final ItineraryData JSON.
-        if turn.content:
-            log_event(
-                "planning_tool_round_result",
-                status="final_content",
-                round=round_idx + 1,
-            )
-            log_event(
-                "planning_model_response_summary",
-                status="ready_to_parse",
-                path="function_calling",
-                content_chars=len(turn.content),
-                content_excerpt=_excerpt(turn.content),
-            )
-            try:
-                with timed_stage("planning_parse_model_json", path="function_calling"):
-                    return output_parser.parse_model_json(turn.content, ItineraryData)
-            except AIGenerationError as exc:
-                return _repair_tool_final_json(
-                    messages=messages,
-                    invalid_content=turn.content,
-                    parse_error=exc,
-                    execute_tool=execute_tool,
-                    total_calls=total_calls,
-                )
-        break
+            if tool_calls >= _MAX_INTAKE_TOOL_CALLS_TOTAL:
+                break
 
-    # Force a final tool-free answer (the model has all tool results by now).
-    messages.append(
-        {
-            "role": "user",
-            "content": "请基于以上对话与工具返回的事实，现在只输出完整的 ItineraryData JSON，"
-            "不要再调用任何工具，不要任何解释、Markdown 或代码块围栏。",
-        }
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "本阶段最多 1 轮工具查询已经结束。请结合已有对话和工具结果，"
+                    "只输出约定的 PlanningIntakeResult JSON；不要生成每日行程。"
+                ),
+            }
+        )
+        final = vivo_chat_client.chat_messages(
+            messages=messages,
+            tools=None,
+            stage="planning_intake_finalize",
+            temperature=0.2,
+            max_completion_tokens=3000,
+            planning_model=planning_model,
+            response_format=(
+                {"type": "json_object"}
+                if planning_model in DEEPSEEK_PLANNING_MODELS
+                else None
+            ),
+            reasoning_effort=_INTAKE_REASONING_EFFORT,
+        )
+    if not final.content:
+        raise AIGenerationError("旅行需求沟通失败：模型未返回内容")
+    try:
+        return output_parser.parse_model_json(final.content, PlanningIntakeResult)
+    except AIGenerationError as exc:
+        error_detail = _model_output_error_detail(exc, final.content)
+        log_event(
+            "planning_intake_json_repair",
+            status="start",
+            path="finalize",
+            reason=error_detail,
+            invalid_content_chars=len(final.content),
+            invalid_content_excerpt=_excerpt(final.content),
+        )
+        messages.extend(
+            [
+                _assistant_history_message(final, planning_model),
+                {
+                    "role": "user",
+                    "content": (
+                        "上一条 PlanningIntakeResult 缺少必需字段或字段类型错误。"
+                        "保留 assistantMessage 的完整含义，并补全 brief 对象；brief 至少包含 "
+                        "origin、destinations、startDate、endDate、travelerCount、budget、"
+                        "transportPreference、lodgingPreference、interests、constraints、"
+                        "assumptions、summary、detailRequirements。未知值用 null 或空数组。"
+                        "detailRequirements 写结构化字段之外的时段/顺序/特殊要求。只输出一个 JSON 对象。\n"
+                        f"【错误诊断】{error_detail}"
+                    ),
+                },
+            ]
+        )
+        repaired = vivo_chat_client.chat_messages(
+            messages=messages,
+            tools=None,
+            stage="planning_intake_finalize_repair",
+            temperature=0.0,
+            max_completion_tokens=4000,
+            planning_model=planning_model,
+            response_format=(
+                {"type": "json_object"}
+                if planning_model in DEEPSEEK_PLANNING_MODELS
+                else None
+            ),
+            reasoning_effort=_INTAKE_REASONING_EFFORT,
+        )
+        if not repaired.content:
+            raise AIGenerationError("旅行需求沟通失败：JSON 修复未返回内容")
+        parsed = output_parser.parse_model_json(
+            repaired.content,
+            PlanningIntakeResult,
+        )
+        log_event(
+            "planning_intake_json_repair",
+            status="success",
+            path="finalize",
+            repaired_content_chars=len(repaired.content),
+        )
+        return parsed
+
+
+def _critical_research_gaps(
+    *,
+    scope: dict[str, Any] | None,
+    remaining_queries: list[str],
+    fact_registry: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Return only gaps important enough to extend research past round five."""
+    if scope is None:
+        return ["旅行范围未声明"]
+    gaps: list[str] = []
+    tool_names = {
+        str(fact.get("tool") or "")
+        for fact in fact_registry.values()
+        if _tool_result_has_usable_fact(fact)
+    }
+    transport_tools = {
+        tool_specs.TOOL_QUERY_RAIL,
+        tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+    }
+    transport_query_keys = {
+        _planning_tool_cache_key(
+            str(fact.get("tool") or ""),
+            fact.get("arguments") if isinstance(fact.get("arguments"), dict) else {},
+        )
+        for fact in fact_registry.values()
+        if str(fact.get("tool") or "") in transport_tools
+        and _tool_result_has_usable_fact(fact)
+    }
+    destinations = scope.get("destinations")
+    destination_list = [
+        str(item) for item in destinations if str(item).strip()
+    ] if isinstance(destinations, list) else []
+    destination_count = len(destination_list)
+    if scope.get("needsTransport") and not transport_query_keys:
+        gaps.append("去返程或跨城大交通事实缺失")
+    elif len(transport_query_keys) < destination_count + 1:
+        gaps.append(
+            f"多城转场交通覆盖不足：{destination_count} 个目的地至少需要 "
+            f"{destination_count + 1} 段大交通查询，目前只有 {len(transport_query_keys)} 段"
+        )
+
+    if scope.get("needsHotel"):
+        missing_hotel_cities = [
+            city
+            for city in destination_list
+            if not _has_hotel_fact_for_city(city, fact_registry)
+        ]
+        if destination_count and missing_hotel_cities:
+            gaps.append(
+                "以下过夜城市还没有具体酒店候选：" + "、".join(missing_hotel_cities[:4])
+            )
+        elif not destination_count and not _has_hotel_fact_for_city(
+            "", fact_registry
+        ):
+            gaps.append("过夜城市的酒店落点缺失")
+
+    if scope.get("needsTransport"):
+        route_facts = [
+            fact
+            for fact in fact_registry.values()
+            if str(fact.get("tool") or "") == tool_specs.TOOL_AMAP_ROUTE
+            and _tool_result_has_usable_fact(fact)
+        ]
+        if tool_specs.TOOL_AMAP_ROUTE not in tool_names:
+            gaps.append("酒店、车站/机场或主要景点的关键路线缺失")
+        else:
+            # Every overnight city needs at least the transport-hub connection
+            # and the first main activity of the day checked, otherwise the model
+            # fills the gap with invented distances and travel times.
+            required_routes = max(2, 2 * destination_count)
+            if len(route_facts) < required_routes:
+                gaps.append(
+                    f"关键路线覆盖不足：{destination_count} 个过夜城市至少需要 "
+                    f"{required_routes} 条 amap_route 查证（酒店↔到离站/机场、"
+                    f"酒店↔当日首个主要地点），目前只有 {len(route_facts)} 条"
+                )
+            if not any(_route_touches_transport_hub(fact) for fact in route_facts):
+                gaps.append("缺少酒店与机场/车站之间的接驳路线查证")
+
+    critical_markers = (
+        "去程",
+        "返程",
+        "往返",
+        "航班",
+        "飞机",
+        "铁路",
+        "火车",
+        "车次",
+        "跨城",
+        "转场",
+        "酒店",
+        "住宿",
+        "关键路线",
+        "接驳",
     )
+    critical_remaining = [
+        query
+        for query in remaining_queries
+        if any(marker in query.lower() for marker in critical_markers)
+    ]
+    if critical_remaining:
+        gaps.append("模型标记仍待查：" + "；".join(critical_remaining[:4]))
+    return list(dict.fromkeys(gaps))
+
+
+_HOTEL_MARKERS = ("酒店", "住宿", "客栈", "民宿", "hotel")
+_TRANSPORT_HUB_MARKERS = ("机场", "火车站", "高铁站", "客运站", "汽车站", "码头")
+
+
+def _city_aliases(city: str) -> list[str]:
+    """Loose aliases so 「喀纳斯（布尔津）」 still matches 「布尔津」 facts."""
+    cleaned = re.sub(r"[（）()\s]+", " ", city).strip()
+    parts = [part for part in re.split(r"[ 、,，/]+", cleaned) if part]
+    aliases: set[str] = set()
+    for part in [cleaned, *parts]:
+        if not part:
+            continue
+        aliases.add(part)
+        trimmed = re.sub(r"(市|县|区|自治州|地区|自治县)$", "", part)
+        if len(trimmed) >= 2:
+            aliases.add(trimmed)
+    return sorted(aliases, key=len, reverse=True)
+
+
+def _has_hotel_fact_for_city(
+    city: str, fact_registry: dict[str, dict[str, Any]]
+) -> bool:
+    """Whether a concrete lodging candidate was searched for this city."""
+    aliases = _city_aliases(city) if city else []
+    for fact in fact_registry.values():
+        if str(fact.get("tool") or "") not in {
+            tool_specs.TOOL_AMAP_POI_SEARCH,
+            tool_specs.TOOL_AMAP_POI_DETAIL,
+            tool_specs.TOOL_AMAP_POI_AROUND,
+        }:
+            continue
+        if not _tool_result_has_usable_fact(fact):
+            continue
+        argument_text = json.dumps(
+            fact.get("arguments") or {}, ensure_ascii=False
+        ).lower()
+        if not any(marker in argument_text for marker in _HOTEL_MARKERS):
+            # `amap_poi_detail` carries only POI IDs, so fall back to the
+            # resolved name/category of the returned fact itself.
+            fact_text = " ".join(
+                str(fact.get(key) or "")
+                for key in ("name", "category", "address", "city_name")
+            ).lower()
+            if not any(marker in fact_text for marker in _HOTEL_MARKERS):
+                continue
+            argument_text = f"{argument_text} {fact_text}"
+        if not aliases:
+            return True
+        haystack = (
+            argument_text
+            + " "
+            + " ".join(
+                str(fact.get(key) or "")
+                for key in ("name", "address", "city_name", "district_name")
+            )
+        )
+        if any(alias in haystack for alias in aliases):
+            return True
+    return False
+
+
+def _route_touches_transport_hub(fact: dict[str, Any]) -> bool:
+    """Whether a route fact connects an airport / station endpoint."""
+    endpoints = " ".join(
+        str(fact.get(key) or "") for key in ("origin", "destination")
+    )
+    return any(marker in endpoints for marker in _TRANSPORT_HUB_MARKERS)
+
+
+def _planning_tool_cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
+    return f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+
+
+def _planning_tool_kind(
+    tool_name: str, allowed_external_tool_names: frozenset[str]
+) -> str:
+    if tool_name in {
+        tool_specs.TOOL_DECLARE_TRIP_SCOPE,
+        tool_specs.TOOL_UPDATE_PLANNING_FACT_STATE,
+        tool_specs.TOOL_FINISH_RESEARCH,
+    }:
+        return "internal"
+    if tool_name in allowed_external_tool_names:
+        return "external"
+    return "unsupported"
+
+
+def _summarize_planning_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep diagnostic structure while bounding large model/tool payloads."""
+    if depth >= 5:
+        return "<max-depth>"
+    if isinstance(value, dict):
+        items = list(value.items())
+        summary = {
+            str(key): _summarize_planning_value(item, depth=depth + 1)
+            for key, item in items[:30]
+        }
+        if len(items) > 30:
+            summary["_omitted_key_count"] = len(items) - 30
+        return summary
+    if isinstance(value, list):
+        summary = [
+            _summarize_planning_value(item, depth=depth + 1)
+            for item in value[:12]
+        ]
+        if len(value) > 12:
+            summary.append({"_omitted_item_count": len(value) - 12})
+        return summary
+    if isinstance(value, str):
+        return value if len(value) <= 1200 else value[:1200] + "…"
+    return value
+
+
+def _fact_tool_counts(facts: dict[str, dict[str, Any]]) -> dict[str, int]:
+    return dict(
+        Counter(str(fact.get("tool") or "unknown") for fact in facts.values())
+    )
+
+
+def _new_fact_id(tool_name: str) -> str:
+    short = tool_name.removeprefix("amap_").removeprefix("query_")
+    return f"fact_{short}_{uuid.uuid4().hex[:12]}"
+
+
+def _register_planning_facts(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+    registry: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach request-unique IDs to every independently selectable fact."""
+    enriched = deepcopy(result)
+    list_keys = [
+        key for key in ("pois", "days", "candidates") if isinstance(enriched.get(key), list)
+    ]
+    has_selectable_items = any(enriched.get(key) for key in list_keys) or isinstance(
+        enriched.get("recommended"), dict
+    )
+    result_context = {
+        key: deepcopy(value)
+        for key, value in enriched.items()
+        if key not in {*list_keys, "recommended"}
+        and not (has_selectable_items and key in _BULKY_CONTEXT_KEYS)
+    }
+    registered = False
+    for key in list_keys:
+        for item in enriched[key]:
+            if not isinstance(item, dict):
+                continue
+            fact_id = _new_fact_id(tool_name)
+            item["fact_id"] = fact_id
+            registry[fact_id] = {
+                "fact_id": fact_id,
+                "tool": tool_name,
+                "arguments": deepcopy(arguments),
+                "result_context": result_context,
+                **deepcopy(item),
+            }
+            registered = True
+    recommended = enriched.get("recommended")
+    if isinstance(recommended, dict):
+        fact_id = _new_fact_id(tool_name)
+        recommended["fact_id"] = fact_id
+        registry[fact_id] = {
+            "fact_id": fact_id,
+            "tool": tool_name,
+            "arguments": deepcopy(arguments),
+            "result_context": result_context,
+            **deepcopy(recommended),
+        }
+        registered = True
+    if not registered:
+        fact_id = _new_fact_id(tool_name)
+        enriched["fact_id"] = fact_id
+        registry[fact_id] = {
+            "fact_id": fact_id,
+            "tool": tool_name,
+            "arguments": deepcopy(arguments),
+            **deepcopy(enriched),
+        }
+    return enriched
+
+
+def _select_planning_facts_for_final(
+    facts: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Bound unselected research results while preserving transport first."""
+    tool_priority = {
+        "searchFlightItineraries": 0,
+        "query_rail_tickets": 1,
+        "amap_weather_range": 2,
+        "amap_route": 3,
+        "amap_poi_detail": 4,
+        "amap_poi_search": 5,
+        "amap_poi_around": 6,
+    }
+    ordered = sorted(
+        facts.items(),
+        key=lambda item: tool_priority.get(str(item[1].get("tool") or ""), 99),
+    )
+    per_query_counts: Counter[str] = Counter()
+    selected: dict[str, dict[str, Any]] = {}
+    for fact_id, fact in ordered:
+        tool_name = str(fact.get("tool") or "unknown")
+        arguments = fact.get("arguments")
+        query_key = _planning_tool_cache_key(
+            tool_name,
+            arguments if isinstance(arguments, dict) else {},
+        )
+        per_query_limit = _MAX_FINAL_FACTS_PER_QUERY.get(tool_name, 8)
+        if per_query_counts[query_key] >= per_query_limit:
+            continue
+        selected[fact_id] = fact
+        per_query_counts[query_key] += 1
+        if len(selected) >= _MAX_FINAL_FACTS:
+            break
+    log_event(
+        "planning_final_fact_selection",
+        status="success",
+        input_fact_count=len(facts),
+        selected_fact_count=len(selected),
+        omitted_fact_count=max(0, len(facts) - len(selected)),
+        selected_fact_tool_counts=_fact_tool_counts(selected),
+    )
+    return selected
+
+
+def _compact_planning_facts(
+    facts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        _compact_planning_fact_value(fact)
+        for fact in facts.values()
+    ]
+
+
+def _compact_planning_fact_value(value: Any, *, field_name: str = "") -> Any:
+    """Remove payloads useless to synthesis while keeping evidence fields."""
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_planning_fact_value(item, field_name=str(key))
+            for key, item in value.items()
+            if str(key) not in _FINAL_FACT_DROP_KEYS
+        }
+    if isinstance(value, list):
+        limit = 1 if field_name == "alternatives" else 12 if field_name == "steps" else 25
+        return [
+            _compact_planning_fact_value(item, field_name=field_name)
+            for item in value[:limit]
+        ]
+    if isinstance(value, str) and len(value) > 1200:
+        return value[:1200] + "…"
+    return value
+
+
+_TIME_WINDOW_BOUNDS = {
+    "早上": ("06:00", "11:59"),
+    "上午": ("06:00", "11:59"),
+    "傍晚": ("17:00", "19:30"),
+    "晚上": ("18:00", "23:59"),
+}
+_TIME_WINDOW_PATTERN = re.compile(
+    r"(?P<month>\d{1,2})月(?P<day>\d{1,2})[日号]"
+    r"(?P<period>早上|上午|傍晚|晚上)(?P<clause>[^，。；\n]{0,80})"
+)
+_DESTINATION_PATTERN = re.compile(
+    r"(?:去|前往|返回|回)(?P<destination>[\u4e00-\u9fff]{2,8}?)(?=[，、。；\s]|$)"
+)
+_CLOCK_PATTERN = re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d")
+_INTERCITY_MARKERS = ("航班", "飞机", "高铁", "动车", "火车", "列车", "返程")
+
+
+def _normalize_clock(value: str | None) -> str | None:
+    if not value or not _CLOCK_PATTERN.fullmatch(value):
+        return None
+    hour, minute = value.split(":", 1)
+    return f"{int(hour):02d}:{minute}"
+
+
+def _time_window_problems(
+    data: ItineraryData, user_text: str
+) -> list[planning_feasibility.Problem]:
+    """Check explicit Chinese departure windows against the generated timeline.
+
+    Findings are day-scoped (``date`` set, no ``schedule_id``): the missing leg is
+    about that day's shape, not a single bad row, so annotate_unresolved can put a
+    day advisory on any trip that states 「X日晚上回Y」— not only the e2e fixture.
+    """
+    try:
+        year = int(data.trip_info.start_date[:4])
+    except (TypeError, ValueError):
+        return []
+    days = {day.date: day for day in data.itinerary}
+    problems: list[planning_feasibility.Problem] = []
+    seen: set[tuple[str, str, str]] = set()
+    for match in _TIME_WINDOW_PATTERN.finditer(user_text):
+        destination_match = _DESTINATION_PATTERN.search(match.group("clause"))
+        if not destination_match:
+            continue
+        date = f"{year:04d}-{int(match.group('month')):02d}-{int(match.group('day')):02d}"
+        period = match.group("period")
+        destination = destination_match.group("destination")
+        anchor = (date, period, destination)
+        if anchor in seen:
+            continue
+        seen.add(anchor)
+        earliest, latest = _TIME_WINDOW_BOUNDS[period]
+        day = days.get(date)
+        matched = False
+        if day:
+            for schedule in day.schedules:
+                text = " ".join(
+                    part
+                    for part in (
+                        schedule.activity,
+                        schedule.transport,
+                        schedule.place_name,
+                    )
+                    if part
+                )
+                if destination not in text and not any(
+                    marker in text for marker in _INTERCITY_MARKERS
+                ):
+                    continue
+                candidate_times = [schedule.start_time or ""]
+                candidate_times.extend(_CLOCK_PATTERN.findall(text))
+                normalized_times = [
+                    normalized
+                    for value in candidate_times
+                    if (normalized := _normalize_clock(value)) is not None
+                ]
+                if any(earliest <= value <= latest for value in normalized_times):
+                    matched = True
+                    break
+        if not matched:
+            problems.append(
+                planning_feasibility.Problem(
+                    message=(
+                        f"{date} {period}前往{destination}缺少 "
+                        f"{earliest}–{latest} 内的独立跨城交通日程"
+                    ),
+                    date=date,
+                )
+            )
+    return problems
+
+
+def _schedule_overlap_problems(
+    data: ItineraryData,
+) -> list[planning_feasibility.Problem]:
+    """Describe overlapping timed schedules for a targeted model correction."""
+    problems: list[planning_feasibility.Problem] = []
+    for day in data.itinerary:
+        timed = sorted(
+            (
+                schedule
+                for schedule in day.schedules
+                if _normalize_clock(schedule.start_time) is not None
+            ),
+            key=lambda schedule: _normalize_clock(schedule.start_time) or "",
+        )
+        previous = None
+        for schedule in timed:
+            if (
+                previous is not None
+                and previous.end_time
+                and schedule.start_time
+                and (_normalize_clock(schedule.start_time) or "")
+                < (_normalize_clock(previous.end_time) or "")
+            ):
+                problems.append(
+                    planning_feasibility.Problem(
+                        message=(
+                            f"{day.date} 的 {previous.id}（至 {previous.end_time}）与 "
+                            f"{schedule.id}（{schedule.start_time} 开始）时间重叠"
+                        ),
+                        date=day.date,
+                        schedule_id=schedule.id,
+                    )
+                )
+            if schedule.end_time and _CLOCK_PATTERN.fullmatch(schedule.end_time):
+                previous = schedule
+    return problems
+
+
+_MAX_FEASIBILITY_REPAIR_ROUNDS = 2
+
+
+def _itinerary_violations(
+    itinerary: ItineraryData,
+    user_text: str,
+    retained_facts: dict[str, dict[str, Any]],
+) -> list[str]:
+    """All deterministic problems worth a repair round, in fix order."""
+    return [
+        problem.message
+        for problem in _itinerary_problems(itinerary, user_text, retained_facts)
+    ]
+
+
+def _itinerary_problems(
+    itinerary: ItineraryData,
+    user_text: str,
+    retained_facts: dict[str, dict[str, Any]],
+) -> list[planning_feasibility.Problem]:
+    """Deterministic findings from the orchestrator-level and fact-level checks.
+
+    A schedule that ignores the user's stated time window or overlaps its
+    neighbour is as unusable as one citing a flight that does not exist, so both
+    block; only the day-density rules are advisory.
+    """
+    problems = list(_time_window_problems(itinerary, user_text))
+    problems.extend(_schedule_overlap_problems(itinerary))
+    problems.extend(
+        planning_feasibility.find_problem_details(itinerary, retained_facts)
+    )
+    seen: set[str] = set()
+    unique: list[planning_feasibility.Problem] = []
+    for problem in problems:
+        if problem.message in seen:
+            continue
+        seen.add(problem.message)
+        unique.append(problem)
+    return unique
+
+
+def _repair_itinerary_violations(
+    *,
+    system_prompt: str,
+    user_text: str,
+    itinerary: ItineraryData,
+    retained_facts: dict[str, dict[str, Any]],
+    planning_model: PlanningModel,
+) -> ItineraryData:
+    """Demand targeted corrections while the plan contradicts its own facts.
+
+    Applies to every planning model. Checks cover explicit user time windows,
+    overlapping schedules, and (crucially) schedules whose departure times,
+    flight/train numbers, distances or travel times are not backed by the facts
+    they cite.
+    """
+    # Mechanical violations are corrected in code first: a model round costs a
+    # minute or more and could rewrite unrelated parts of a plan that is otherwise
+    # fine, and these edits have exactly one correct outcome anyway.
+    current, autofixed = planning_feasibility.autofix(itinerary, retained_facts)
+    if autofixed:
+        log_event(
+            "planning_feasibility_autofix",
+            status="applied",
+            fix_count=len(autofixed),
+            fixes=autofixed[:30],
+            planning_model=planning_model,
+        )
+    problems = _itinerary_violations(current, user_text, retained_facts)
+    if not problems:
+        return current
+    for attempt in range(1, _MAX_FEASIBILITY_REPAIR_ROUNDS + 1):
+        planning_progress.report(
+            "verifying",
+            repair_round=attempt,
+            detail=f"正在修正 {len(problems)} 处与事实不符之处",
+        )
+        log_event(
+            "planning_feasibility_repair",
+            status="start",
+            attempt=attempt,
+            problem_count=len(problems),
+            problems=problems[:20],
+            planning_model=planning_model,
+        )
+        repaired = _request_itinerary_repair(
+            system_prompt=system_prompt,
+            user_text=user_text,
+            itinerary=current,
+            retained_facts=retained_facts,
+            problems=problems,
+            planning_model=planning_model,
+            attempt=attempt,
+        )
+        if repaired is None:
+            break
+        remaining = _itinerary_violations(repaired, user_text, retained_facts)
+        resolved = len(problems) - len(remaining)
+        log_event(
+            "planning_feasibility_repair",
+            status="success" if not remaining else "partial",
+            attempt=attempt,
+            resolved_count=max(0, resolved),
+            remaining_count=len(remaining),
+            remaining_problems=remaining[:20],
+            planning_model=planning_model,
+        )
+        current = repaired
+        if not remaining:
+            return current
+        if len(remaining) >= len(problems):
+            # No forward progress; a further identical request would not help.
+            break
+        problems = remaining
+    unresolved = _itinerary_problems(current, user_text, retained_facts)
+    blocking = [problem for problem in unresolved if problem.blocking]
+    if not unresolved:
+        return current
+    # A plan that survives repair with a row we cannot vouch for is still worth
+    # far more than no plan at all — provided that row says so plainly.
+    current, flags = planning_feasibility.annotate_unresolved(current, blocking)
+    log_event(
+        "planning_feasibility_repair",
+        status="shipped_with_flags" if blocking else "shipped_with_advisories",
+        remaining_count=len(unresolved),
+        blocking_count=len(blocking),
+        remaining_problems=[problem.message for problem in unresolved][:20],
+        flags=flags,
+        planning_model=planning_model,
+    )
+    return current
+
+
+def _request_itinerary_repair(
+    *,
+    system_prompt: str,
+    user_text: str,
+    itinerary: ItineraryData,
+    retained_facts: dict[str, dict[str, Any]],
+    problems: list[str],
+    planning_model: PlanningModel,
+    attempt: int,
+) -> ItineraryData | None:
+    current = json.dumps(itinerary.model_dump(mode="json"), ensure_ascii=False)
+    facts = json.dumps(_compact_planning_facts(retained_facts), ensure_ascii=False)
+    repair = vivo_chat_client.chat_messages(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "以下行程已完成事实检索，但存在与事实矛盾或不可执行的问题。"
+                    "只修复列出的问题，不要重写无关内容：跨城交通必须单独成条，"
+                    "start_time/end_time 必须直接取自所引班次事实的真实起降时刻；"
+                    "distance_km/travel_minutes 必须等于所引 amap_route 事实的值，"
+                    "没有对应路线事实时置为 null 并在 transport 写明需以地图实时为准；"
+                    "不得写未查到的航班号或车次号；保留其余行程、fact_refs 和地图语义字段，"
+                    "消除时间重叠。不得调用工具，只输出完整 ItineraryData JSON。\n"
+                    f"【用户需求】{user_text[:4000]}\n"
+                    f"【必须修复】{json.dumps(problems[:30], ensure_ascii=False)}\n"
+                    f"【可引用的保留事实】{facts}\n"
+                    f"【当前行程】{current}"
+                ),
+            },
+        ],
+        tools=None,
+        stage="planning_feasibility_repair",
+        temperature=0.0,
+        max_completion_tokens=_MAX_GENERATION_TOKENS,
+        planning_model=planning_model,
+        response_format=(
+            {"type": "json_object"}
+            if planning_model in DEEPSEEK_PLANNING_MODELS
+            else None
+        ),
+        # No max_attempts cap: pinning it to 1 meant a single reasoning-only round
+        # (observed: flash burnt the budget and returned nothing) silently spent
+        # the only repair round, shipping the problems it was called to fix.
+    )
+    if not repair.content:
+        log_event(
+            "planning_feasibility_repair",
+            status="empty_response",
+            attempt=attempt,
+            planning_model=planning_model,
+        )
+        return None
+    try:
+        return output_parser.parse_model_json(repair.content, ItineraryData)
+    except AIGenerationError as exc:
+        log_event(
+            "planning_feasibility_repair",
+            status="unparseable",
+            attempt=attempt,
+            error_message=str(exc)[:500],
+            planning_model=planning_model,
+        )
+        return None
+
+
+def _generate_itinerary_from_research(
+    *,
+    system_prompt: str,
+    user_text: str,
+    scope: dict[str, Any],
+    retained_facts: dict[str, dict[str, Any]],
+    research_summary: dict[str, Any],
+    stage: str,
+    planning_model: PlanningModel,
+) -> ItineraryData:
+    reference_fact_rule = "铁路参考事实标 reference。"
+    if planning_model in DEEPSEEK_PLANNING_MODELS:
+        reference_fact_rule = "飞友航班/中转与铁路参考事实标 reference。"
+    final_facts = _compact_planning_facts(retained_facts)
+    compact_user = (
+        f"{user_text}\n\n【模型已声明的旅行范围】\n"
+        f"{json.dumps(scope, ensure_ascii=False)}\n\n【保留的完整工具事实】\n"
+        f"{json.dumps(final_facts, ensure_ascii=False)}\n\n"
+        f"【研究结束摘要】\n{json.dumps(research_summary, ensure_ascii=False)}\n\n"
+        "工具已关闭。工具事实已去除路线折线和供应商原始报文，但 fact_id 与规划所需字段完整保留。"
+        "现在只输出完整 ItineraryData JSON。新增字段可选；使用事实的日程必须填写"
+        " fact_refs，只有 status=ok 的高德事实可标 verified，"
+        + reference_fact_rule
+        + " transport_mode 只能是 driving/transit/walking/bicycling 或 null；飞机、铁路等大交通写入 transport，transport_mode=null。"
+        "用户明确的日期与时段是不可改写的硬约束：早上须在 06:00–11:59 出发，"
+        "傍晚须在 17:00–19:30 出发，晚上须在 18:00 以后出发；没有已核验班次时，"
+        "只能在原时间窗内给 reference 方案，不得用其他时段替代。"
+        "同一天任一日程的 start_time 不得早于上一日程的 end_time，禁止时间重叠；"
+        "备选交通不得与同日活动同时排入主时间线。"
+        "每段带时段硬约束的跨城交通必须单独成为一条 schedule，start_time 填实际发车或起飞时间；"
+        "去车站、取行李、候车等准备活动不得与该跨城交通合并为同一条。"
+        "每段跨城交通只能给一个可执行的主方案，禁止在主时间线写“高铁或航班”等二选一；"
+        "每个具名酒店和景点优先使用保留事实中的名称、坐标与 fact_id，已有匹配事实却标 unverified"
+        " 属于不合格；不得为了凑满日程编造未检索的具名景点。"
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": compact_user},
+    ]
     final = vivo_chat_client.chat_messages(
-        messages=messages, tools=None, max_completion_tokens=16000
+        messages=messages,
+        tools=None,
+        stage=stage,
+        temperature=0.2,
+        max_completion_tokens=_MAX_GENERATION_TOKENS,
+        planning_model=planning_model,
+        response_format=(
+            {"type": "json_object"}
+            if planning_model in DEEPSEEK_PLANNING_MODELS
+            else None
+        ),
+        # Final synthesis is where flight times, route evidence and daily pacing
+        # have to be reconciled against each other, so thinking stays on.
+        thinking_enabled=None,
     )
     if final.content:
         log_event(
             "planning_model_response_summary",
             status="ready_to_parse",
-            path="forced_final",
+            path="research_final",
+            generation_stage=stage,
             content_chars=len(final.content),
             content_excerpt=_excerpt(final.content),
+            scope=_summarize_planning_value(scope),
+            retained_fact_count=len(retained_facts),
+            final_fact_chars=len(json.dumps(final_facts, ensure_ascii=False)),
+            retained_fact_ids=list(retained_facts),
+            retained_fact_tool_counts=_fact_tool_counts(retained_facts),
+            research_summary=_summarize_planning_value(research_summary),
+            planning_model=planning_model,
         )
         try:
-            with timed_stage("planning_parse_model_json", path="forced_final"):
+            with timed_stage("planning_parse_model_json", path="research_final"):
                 return output_parser.parse_model_json(final.content, ItineraryData)
         except AIGenerationError as exc:
-            return _repair_tool_final_json(
-                messages=messages,
+            field_repaired = _repair_final_json_fields(
                 invalid_content=final.content,
                 parse_error=exc,
-                execute_tool=execute_tool,
-                total_calls=total_calls,
+                planning_model=planning_model,
             )
-    raise AIGenerationError("行程规划生成失败：模型未返回合法 JSON")
+            if field_repaired is not None:
+                return field_repaired
+            messages.extend(
+                [
+                    {"role": "assistant", "content": final.content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "字段级补丁无法完成修复。请根据以下精确诊断修复结构，"
+                            "只输出完整合法 JSON，"
+                            "不得调用工具或添加解释。"
+                            f"\n【错误诊断】{_model_output_error_detail(exc, final.content)}"
+                        ),
+                    },
+                ]
+            )
+            repaired = vivo_chat_client.chat_messages(
+                messages=messages,
+                tools=None,
+                stage="planning_final_full_repair",
+                temperature=0.1,
+                max_completion_tokens=_MAX_GENERATION_TOKENS,
+                planning_model=planning_model,
+                response_format=(
+                    {"type": "json_object"}
+                    if planning_model in DEEPSEEK_PLANNING_MODELS
+                    else None
+                ),
+                thinking_enabled=(
+                    False if planning_model in DEEPSEEK_PLANNING_MODELS else None
+                ),
+            )
+            if repaired.content:
+                return output_parser.parse_model_json(repaired.content, ItineraryData)
+        raise AIGenerationError("行程规划生成失败：模型未返回合法 JSON")
+    log_event(
+        "planning_final_empty_content",
+        status="failed",
+        generation_stage=stage,
+        retained_fact_count=len(retained_facts),
+        planning_model=planning_model,
+    )
+    raise AIGenerationError(
+        "行程规划生成失败：模型只输出了思考过程、没有给出行程正文，请重试"
+    )
+
+
+def _repair_final_json_fields(
+    *,
+    invalid_content: str,
+    parse_error: AIGenerationError,
+    planning_model: PlanningModel,
+) -> ItineraryData | None:
+    """Ask for a bounded field patch when the original JSON is parseable."""
+    cause = parse_error.__cause__
+    if not isinstance(cause, ValidationError):
+        log_event(
+            "planning_final_field_patch",
+            status="skipped",
+            reason="json_not_parseable_or_no_field_paths",
+        )
+        return None
+    try:
+        original = json.loads(output_parser.extract_first_json(invalid_content))
+    except (AIGenerationError, json.JSONDecodeError, TypeError):
+        log_event(
+            "planning_final_field_patch",
+            status="skipped",
+            reason="json_document_unavailable",
+        )
+        return None
+    if not isinstance(original, dict):
+        return None
+
+    allowed_paths = [
+        list(item.get("loc") or ())
+        for item in cause.errors()
+        if item.get("loc")
+    ][:12]
+    if not allowed_paths:
+        return None
+    diagnostic = _model_output_error_detail(parse_error, invalid_content)
+    log_event(
+        "planning_final_field_patch",
+        status="start",
+        allowed_paths=allowed_paths,
+        error_detail=diagnostic,
+        planning_model=planning_model,
+    )
+    patch_prompt = (
+        "你是 JSON 字段补丁器。不得重写整份行程，只能修改允许路径中的错误字段。"
+        "输出一个 JSON 对象：{\"patches\":[{\"path\":[\"itinerary\",0,...],"
+        "\"value\":<替换后的值>}]} 。path 必须与允许路径完全一致，不得增删其他字段。\n"
+        f"【允许路径】{json.dumps(allowed_paths, ensure_ascii=False)}\n"
+        f"【错误诊断】{diagnostic}\n"
+        f"【原 JSON】{json.dumps(original, ensure_ascii=False)}"
+    )
+    try:
+        turn = vivo_chat_client.chat_messages(
+            messages=[
+                {"role": "system", "content": "只输出合法 JSON 字段补丁，不要解释。"},
+                {"role": "user", "content": patch_prompt},
+            ],
+            tools=None,
+            stage="planning_final_field_patch",
+            temperature=0.0,
+            max_completion_tokens=3000,
+            planning_model=planning_model,
+            response_format=(
+                {"type": "json_object"}
+                if planning_model in DEEPSEEK_PLANNING_MODELS
+                else None
+            ),
+            thinking_enabled=(
+                False if planning_model in DEEPSEEK_PLANNING_MODELS else None
+            ),
+        )
+        if not turn.content:
+            raise ValueError("empty patch response")
+        payload = json.loads(output_parser.extract_first_json(turn.content))
+        patches = payload.get("patches") if isinstance(payload, dict) else None
+        if not isinstance(patches, list) or not patches:
+            raise ValueError("patches must be a non-empty list")
+        allowed = {_json_path_key(path) for path in allowed_paths}
+        patched = deepcopy(original)
+        applied_paths: list[list[Any]] = []
+        for item in patches[:12]:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), list):
+                raise ValueError("invalid patch entry")
+            path = item["path"]
+            if _json_path_key(path) not in allowed:
+                raise ValueError("patch path outside validation errors")
+            _set_json_path(patched, path, item.get("value"))
+            applied_paths.append(path)
+        result = ItineraryData.model_validate(patched)
+        log_event(
+            "planning_final_field_patch",
+            status="success",
+            patch_count=len(applied_paths),
+            applied_paths=applied_paths,
+            response_chars=len(turn.content),
+            planning_model=planning_model,
+        )
+        return result
+    except (AIGenerationError, ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        log_event(
+            "planning_final_field_patch",
+            status="failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:1000],
+            planning_model=planning_model,
+        )
+        return None
+
+
+def _json_path_key(path: list[Any]) -> str:
+    return json.dumps(path, ensure_ascii=False, separators=(",", ":"))
+
+
+def _set_json_path(document: dict[str, Any], path: list[Any], value: Any) -> None:
+    if not path:
+        raise ValueError("root replacement is not allowed")
+    current: Any = document
+    for part in path[:-1]:
+        if isinstance(current, dict) and isinstance(part, str) and part in current:
+            current = current[part]
+        elif (
+            isinstance(current, list)
+            and isinstance(part, int)
+            and 0 <= part < len(current)
+        ):
+            current = current[part]
+        else:
+            raise ValueError("patch parent path does not exist")
+    leaf = path[-1]
+    if isinstance(current, dict) and isinstance(leaf, str):
+        current[leaf] = value
+        return
+    if isinstance(current, list) and isinstance(leaf, int) and 0 <= leaf < len(current):
+        current[leaf] = value
+        return
+    raise ValueError("patch leaf path is invalid")
 
 
 def _repair_tool_final_json(
@@ -1073,7 +3157,7 @@ def _repair_tool_final_json(
                 else None
             ),
             temperature=0.0,
-            max_completion_tokens=16000,
+            max_completion_tokens=_MAX_GENERATION_TOKENS,
             timeout_seconds=_JSON_REPAIR_TIMEOUT_SECONDS,
             max_attempts=1,
         )
@@ -1134,27 +3218,40 @@ def _execute_repair_tools_and_finalize(
             ],
         }
     )
-    for offset, tc in enumerate(executable_calls, start=1):
-        args = _safe_json_args(tc.arguments)
+    parsed_calls = [(tc, _safe_json_args(tc.arguments)) for tc in executable_calls]
+    batch_requests: dict[str, tuple[str, dict[str, Any]]] = {}
+    for tc, args in parsed_calls:
+        cache_key = _planning_tool_cache_key(tc.name, args)
+        batch_requests.setdefault(cache_key, (tc.name, args))
+    batch_results = _execute_external_batch(batch_requests, execute_tool)
+    for offset, (tc, args) in enumerate(parsed_calls, start=1):
         log_event(
             "planning_execute_tool",
             status="start",
             tool_name=tc.name,
+            arguments=args,
             total_calls=total_calls + offset,
             source="json_repair",
         )
-        result = execute_tool(tc.name, args)
+        result = deepcopy(
+            batch_results[_planning_tool_cache_key(tc.name, args)]
+        )
         log_event(
             "planning_execute_tool",
             status=result.get("status", "unknown"),
             tool_name=tc.name,
+            arguments=args,
+            result=result,
             source="json_repair",
         )
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": json.dumps(result, ensure_ascii=False),
+                "content": json.dumps(
+                    _compact_planning_fact_value(result),
+                    ensure_ascii=False,
+                ),
             }
         )
     if len(executable_calls) < len(repair.tool_calls):
@@ -1181,7 +3278,7 @@ def _execute_repair_tools_and_finalize(
         messages=messages,
         tools=None,
         temperature=0.0,
-        max_completion_tokens=16000,
+        max_completion_tokens=_MAX_GENERATION_TOKENS,
         timeout_seconds=_JSON_REPAIR_TIMEOUT_SECONDS,
         max_attempts=1,
     )
@@ -1212,7 +3309,7 @@ def _plain_fallback_with_tool_history(
             messages=messages,
             tools=None,
             temperature=0.0,
-            max_completion_tokens=16000,
+            max_completion_tokens=_MAX_GENERATION_TOKENS,
             timeout_seconds=_PLAIN_FALLBACK_TIMEOUT_SECONDS,
             max_attempts=1,
         )
@@ -1266,14 +3363,20 @@ def _safe_json_args(raw: str) -> dict:
         return {}
 
 
-def _plan_plain(system_prompt: str, user_text: str) -> ItineraryData:
+def _plan_plain(
+    system_prompt: str,
+    user_text: str,
+    *,
+    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
+) -> ItineraryData:
     """No-tools planning fallback; one JSON-repair retry allowed."""
     with timed_stage("planning_plain_model"):
         raw = vivo_chat_client.chat_json(
             task=vivo_chat_client.TASK_PLANNING,
             system_prompt=system_prompt,
             user_text=user_text,
-            max_completion_tokens=16000,
+            max_completion_tokens=_MAX_GENERATION_TOKENS,
+            planning_model=planning_model,
         )
     try:
         log_event(
@@ -1299,7 +3402,8 @@ def _plan_plain(system_prompt: str, user_text: str) -> ItineraryData:
                 task=vivo_chat_client.TASK_PLANNING,
                 system_prompt=system_prompt,
                 user_text=repair_text,
-                max_completion_tokens=16000,
+                max_completion_tokens=_MAX_GENERATION_TOKENS,
+                planning_model=planning_model,
             )
         try:
             log_event(

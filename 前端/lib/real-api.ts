@@ -5,7 +5,15 @@
  * 端点路径不含 /api 前缀（base 已含），严格对齐《数据结构与通信接口规范》三与四。
  * 本文件不处理 code/message/data，也不做本地数据兜底。
  */
-import type { ItineraryData, Plan, PostcardGroup, Report } from "@/types"
+import type {
+  ItineraryData,
+  Plan,
+  PlanningProgressSnapshot,
+  PlanningResponse,
+  PostcardGroup,
+  Report,
+  TravelMemoryDisplay,
+} from "@/types"
 import { apiClient, jsonInit } from "./http-client"
 import type { GenerateInput, GenerateResult, PlanWithAIInput, TravelApi } from "./api"
 
@@ -37,7 +45,13 @@ export const realApi: TravelApi = {
   },
 
   planWithAI(input: PlanWithAIInput) {
-    return apiClient<ItineraryData>("/ai/planning", jsonInit("POST", input))
+    return apiClient<PlanningResponse>("/ai/planning", jsonInit("POST", input))
+  },
+
+  getPlanningProgress(token: string) {
+    return apiClient<PlanningProgressSnapshot | null>(
+      `/ai/planning/progress?token=${encodeURIComponent(token)}`,
+    )
   },
 
   createPlan(input: { itineraryData: ItineraryData }) {
@@ -46,6 +60,32 @@ export const realApi: TravelApi = {
 
   updatePlan(id: string, input: { itineraryData: ItineraryData }) {
     return apiClient<Plan>(`/plans/${id}`, jsonInit("PUT", input))
+  },
+
+  getTravelMemory() {
+    return apiClient<TravelMemoryDisplay>("/memories/travel")
+  },
+
+  updateTravelMemoryOverview(input: { title: string; content: string }) {
+    return apiClient<TravelMemoryDisplay>("/memories/travel/overview", jsonInit("PUT", input))
+  },
+
+  updateTravelMemoryDescription(id: string, input: { title: string; content: string }) {
+    return apiClient<TravelMemoryDisplay>(
+      `/memories/travel/descriptions/${encodeURIComponent(id)}`,
+      jsonInit("PUT", input),
+    )
+  },
+
+  updateTravelMemoryPlanningPreferences(input: { transport: string; hotel: string; attractions: string; food: string; pace: string; other: string }) {
+    return apiClient<TravelMemoryDisplay>("/memories/travel/planning-preferences", jsonInit("PUT", input))
+  },
+
+  deleteTravelMemoryDescription(id: string) {
+    return apiClient<TravelMemoryDisplay>(
+      `/memories/travel/descriptions/${encodeURIComponent(id)}`,
+      jsonInit("DELETE"),
+    )
   },
 
   async deletePostcardGroup(id: string) {

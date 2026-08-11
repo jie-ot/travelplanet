@@ -1,24 +1,46 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useApp } from "@/components/shared/app-context"
 import { TopBar } from "@/components/shared/top-bar"
 import { ItineraryDetail } from "@/components/shared/itinerary-detail"
-import { PlanetLoader } from "@/components/shared/planet-loader"
+import {
+  PlanningConversation,
+  type PlanningConversationMessage,
+} from "@/components/shared/planning-conversation"
+import { PlanningProgress } from "@/components/shared/planning-progress"
+import { PlanningModelSelector } from "@/components/shared/planning-model-selector"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
-import { Sparkles, Save, RotateCcw, Wand2, History, Send } from "lucide-react"
+import { MemoryEntryButton } from "@/components/shared/memory-entry-button"
+import { TravelMemoryDrawer } from "@/components/shared/travel-memory-drawer"
+import { usePlanningProgress } from "@/lib/use-planning-progress"
+import { History, Sparkles, Save, RotateCcw, Send } from "lucide-react"
+import type { PlanningBrief, PlanningChecklistItem, PlanningModel } from "@/types"
+
+const DEFAULT_PLANNING_MODEL: PlanningModel = "doubao-seed-2.0-pro"
+
+const INITIAL_MESSAGES: PlanningConversationMessage[] = [
+  {
+    id: "welcome",
+    role: "assistant",
+    content:
+      "你好，我会先和你聊清楚这趟旅行，再整理一份确认清单。你可以从任何想法开始：想去哪、什么时候出发，或者只是想找点灵感。",
+  },
+]
 
 export function PlanningView() {
   const {
     navigate,
     goBack,
+    registerBackHandler,
     toast,
     toastCode,
     draftItineraryData,
     editingPlanId,
     hasUnsavedDraft,
     planning,
-    planFirstTurn,
+    planningProgressToken,
+    planningTurn,
     planRefine,
     beginNewPlan,
     discardDraft,
@@ -29,27 +51,121 @@ export function PlanningView() {
   const [prompt, setPrompt] = useState("")
   const [refinePrompt, setRefinePrompt] = useState("")
   const [saved, setSaved] = useState(false)
+  const [chatMessages, setChatMessages] =
+    useState<PlanningConversationMessage[]>(INITIAL_MESSAGES)
+  const [brief, setBrief] = useState<PlanningBrief | null>(null)
+  const [checklist, setChecklist] = useState<PlanningChecklistItem[]>([])
+  const [conversationPhase, setConversationPhase] =
+    useState<"collecting" | "confirming">("collecting")
+  const [selectedModel, setSelectedModel] =
+    useState<PlanningModel>(DEFAULT_PLANNING_MODEL)
+  const [refinementModelLocked, setRefinementModelLocked] = useState(false)
+  const [generationRequested, setGenerationRequested] = useState(false)
+  const [showMemoryDrawer, setShowMemoryDrawer] = useState(false)
   // 未保存草稿返回拦截（规范 §10.5）
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
   const pendingLeave = useRef<(() => void) | null>(null)
 
   // 继续编辑的草稿载入已在「历史规划」点击时完成（beginEditPlan + URL 导航），此处仅消费 context
 
-  const phase: "input" | "generating" | "result" = planning
-    ? "generating"
-    : draftItineraryData
-      ? "result"
-      : "input"
+  const phase: "conversation" | "generating" | "result" =
+    planning && (generationRequested || draftItineraryData)
+      ? "generating"
+      : draftItineraryData
+        ? "result"
+        : "conversation"
+  // 只在待机屏可见时轮询；对话澄清轮不占用额外请求。
+  const progress = usePlanningProgress(planningProgressToken, phase === "generating")
+  const conversationModelLocked = chatMessages.some(
+    (message) => !!message.planningModel,
+  )
+  const resultModelLocked = conversationModelLocked || refinementModelLocked
 
-  async function handleGenerate() {
+  async function handleConversationSend() {
     const text = prompt.trim()
     if (!text) {
       toastCode(1002)
       return
     }
+    const userMessage: PlanningConversationMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: text,
+      planningModel: selectedModel,
+    }
+    const nextMessages = [...chatMessages, userMessage]
+    setChatMessages(nextMessages)
+    setPrompt("")
     setSaved(false)
-    const result = await planFirstTurn(text)
-    if (result) setPrompt("")
+    const response = await planningTurn({
+      message: text,
+      planningModel: selectedModel,
+      context: null,
+      messages: nextMessages.map(({ role, content, planningModel }) => ({
+        role,
+        content,
+        planningModel,
+      })),
+      brief,
+      confirmed: false,
+    })
+    if (!response) return
+    setBrief(response.brief)
+    setChecklist(response.checklist)
+    if (response.phase !== "completed") setConversationPhase(response.phase)
+    if (response.assistantMessage) {
+      setChatMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          content: response.assistantMessage,
+          planningModel: response.planningModel,
+        },
+      ])
+    }
+  }
+
+  async function handleConfirmPlan() {
+    if (!brief || conversationPhase !== "confirming") return
+    const confirmationText = "这份确认清单无误，请开始生成行程。"
+    const userMessage: PlanningConversationMessage = {
+      id: `user-confirm-${Date.now()}`,
+      role: "user",
+      content: confirmationText,
+      planningModel: selectedModel,
+    }
+    const nextMessages = [...chatMessages, userMessage]
+    setChatMessages(nextMessages)
+    setGenerationRequested(true)
+    const response = await planningTurn({
+      message: confirmationText,
+      planningModel: selectedModel,
+      context: null,
+      messages: nextMessages.map(({ role, content, planningModel }) => ({
+        role,
+        content,
+        planningModel,
+      })),
+      brief,
+      confirmed: true,
+    })
+    setGenerationRequested(false)
+    if (!response || response.itinerary) return
+    setBrief(response.brief)
+    setChecklist(response.checklist)
+    if (response.phase !== "completed") setConversationPhase(response.phase)
+    if (response.assistantMessage) {
+      setChatMessages((current) => [
+        ...current,
+        {
+          id: `assistant-confirm-${Date.now()}`,
+          role: "assistant",
+          content: response.assistantMessage,
+          planningModel: response.planningModel,
+        },
+      ])
+    }
   }
 
   async function handleRefine() {
@@ -60,7 +176,8 @@ export function PlanningView() {
     }
     setSaved(false)
     setRefinePrompt("")
-    const result = await planRefine(text)
+    setRefinementModelLocked(true)
+    const result = await planRefine(text, selectedModel)
     if (result) toast("已根据你的调整重新打磨规划", "success")
   }
 
@@ -78,6 +195,23 @@ export function PlanningView() {
     setPrompt("")
     setRefinePrompt("")
     setSaved(false)
+    setChatMessages(INITIAL_MESSAGES)
+    setBrief(null)
+    setChecklist([])
+    setConversationPhase("collecting")
+    setSelectedModel(DEFAULT_PLANNING_MODEL)
+    setRefinementModelLocked(false)
+    setGenerationRequested(false)
+  }
+
+  function leavePlanning(action: () => void) {
+    beginNewPlan()
+    setPrompt("")
+    setRefinePrompt("")
+    setSaved(false)
+    setSelectedModel(DEFAULT_PLANNING_MODEL)
+    setRefinementModelLocked(false)
+    action()
   }
 
   // 离开规划页前若有未保存草稿则拦截确认
@@ -97,69 +231,79 @@ export function PlanningView() {
     action?.()
   }
 
+  useEffect(
+    () =>
+      registerBackHandler(() => {
+        const leave = () => {
+          beginNewPlan()
+          setPrompt("")
+          setRefinePrompt("")
+          setSaved(false)
+          goBack()
+        }
+        if (hasUnsavedDraft && draftItineraryData) {
+          pendingLeave.current = leave
+          setShowLeaveConfirm(true)
+          return
+        }
+        leave()
+      }),
+    [beginNewPlan, draftItineraryData, goBack, hasUnsavedDraft, registerBackHandler],
+  )
+
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <TopBar
         title={editingPlanId ? "重新编辑规划" : "旅行规划"}
-        onBack={() => guardedLeave(goBack)}
+        onBack={() => guardedLeave(() => leavePlanning(goBack))}
+        showUserBadge={false}
         right={
-          <button
-            type="button"
-            onClick={() => guardedLeave(() => (editingPlanId ? goBack() : navigate({ page: "history" })))}
-            className="ui-pressable flex min-h-11 items-center gap-1.5 rounded-full bg-card/94 px-3.5 py-2 text-xs font-semibold text-foreground shadow-sm ring-1 ring-border/80"
-          >
-            <History className="h-3.5 w-3.5 text-primary" aria-hidden />
-            历史规划
-          </button>
+          <div className="flex w-full items-center justify-end gap-1.5">
+            <button
+              type="button"
+              onClick={() =>
+                guardedLeave(() =>
+                  leavePlanning(() =>
+                    editingPlanId ? goBack() : navigate({ page: "history" }),
+                  ),
+                )
+              }
+              className="ui-pressable flex h-10 shrink-0 items-center justify-center gap-1 rounded-full bg-card/94 px-3 text-[0.7rem] font-semibold text-foreground shadow-sm ring-1 ring-border/80 min-[400px]:h-11 min-[400px]:gap-1.5 min-[400px]:px-3.5 min-[400px]:text-xs"
+            >
+              <History className="h-3.5 w-3.5 text-primary" aria-hidden />
+              历史规划
+            </button>
+            <MemoryEntryButton onClick={() => setShowMemoryDrawer(true)} />
+          </div>
         }
       />
 
-      <div className="flex-1 overflow-y-auto no-scrollbar">
-        {phase === "input" && (
-          <div className="flex flex-col gap-5 px-4 py-5 min-[400px]:gap-6 min-[400px]:px-5 min-[400px]:py-6">
-            <div className="rounded-2xl border border-white/10 bg-[#07516c] p-5 text-white shadow-[0_16px_32px_-22px_rgba(6,45,72,0.85)]">
-              <div className="flex items-center gap-2 text-[#73d4df]">
-                <Wand2 className="h-5 w-5" />
-                <span className="font-display text-sm font-bold tracking-tight">告诉星球你的旅行想法</span>
-              </div>
-              <p className="mt-2 font-editorial text-sm font-medium leading-relaxed text-white/76">
-                描述出发日期、旅行天数、出发地、目的地等，为您生成专属行程。
-              </p>
-            </div>
-
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="例如：我想在7月20号从武汉去大理、丽江玩3天，我喜欢古城和自然风光..."
-              rows={5}
-              className="w-full resize-none rounded-2xl border border-[#0a3850]/12 bg-card/95 p-4 text-sm leading-relaxed text-foreground shadow-[0_12px_24px_-22px_rgba(6,45,72,0.7)] outline-none transition placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/20"
-            />
-
-            <button
-              type="button"
-              onClick={handleGenerate}
-              className="ui-pressable mt-1 flex min-h-12 items-center justify-center gap-2 rounded-full bg-primary py-3 text-sm font-semibold text-primary-foreground shadow-[0_14px_26px_-16px_rgba(7,143,171,0.9)]"
-            >
-              <Sparkles className="h-4 w-4" />
-              生成专属行程
-            </button>
-          </div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {phase === "conversation" && (
+          <PlanningConversation
+            messages={chatMessages}
+            phase={conversationPhase}
+            checklist={checklist}
+            value={prompt}
+            busy={planning}
+            planningModel={selectedModel}
+            modelLocked={conversationModelLocked}
+            onChange={setPrompt}
+            onModelChange={setSelectedModel}
+            onSend={() => void handleConversationSend()}
+            onConfirm={() => void handleConfirmPlan()}
+          />
         )}
 
         {phase === "generating" && (
-          <div className="flex h-full flex-col items-center justify-center gap-5 px-8 py-16">
-            <PlanetLoader />
-            <div className="text-center">
-              <p className="text-sm font-semibold text-foreground">星球正在为你规划行程…</p>
-              <p className="mt-1 text-xs text-muted-foreground">正在分析偏好、串联景点、编排每日节奏</p>
-              <p className="mt-2 text-xs text-muted-foreground">这可能需要3-5分钟</p>
-            </div>
+          <div className="h-full overflow-y-auto px-4 py-6 no-scrollbar min-[400px]:px-5">
+            <PlanningProgress snapshot={progress} />
           </div>
         )}
 
         {phase === "result" && draftItineraryData && (
-          <div className="px-4 py-5 min-[400px]:px-5 min-[400px]:py-6">
-            <div className="mb-4 flex items-start gap-2 rounded-xl border border-primary/10 bg-secondary/85 px-3 py-2.5 text-sm text-secondary-foreground">
+          <div className="h-full overflow-y-auto pb-6 no-scrollbar">
+            <div className="mx-4 mb-4 mt-5 flex items-start gap-2 rounded-xl border border-primary/10 bg-secondary/85 px-3 py-2.5 text-sm text-secondary-foreground min-[400px]:mx-5">
               <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
               <span>
                 {editingPlanId
@@ -175,6 +319,17 @@ export function PlanningView() {
       {/* 结果态底部操作区：对话式打磨 + 保存 */}
       {phase === "result" && draftItineraryData && (
         <div className="border-t border-[#0a3850]/12 bg-card/96 px-4 py-3 shadow-[0_-12px_30px_-24px_rgba(6,45,72,0.65)] backdrop-blur min-[400px]:px-5 min-[400px]:py-4">
+          {!resultModelLocked ? (
+            <div className="mb-3">
+              <PlanningModelSelector
+                value={selectedModel}
+                locked={resultModelLocked}
+                disabled={planning}
+                compact
+                onChange={setSelectedModel}
+              />
+            </div>
+          ) : null}
           <div className="flex items-end gap-2">
             <textarea
               value={refinePrompt}
@@ -223,7 +378,11 @@ export function PlanningView() {
             {saved && (
               <button
                 type="button"
-                onClick={() => (editingPlanId ? goBack() : navigate({ page: "history" }))}
+                onClick={() =>
+                  leavePlanning(() =>
+                    editingPlanId ? goBack() : navigate({ page: "history" }),
+                  )
+                }
                 className="ui-pressable min-h-11 rounded-full px-3 text-xs font-medium text-primary"
               >
                 前往「历史规划」查看 →
@@ -270,6 +429,9 @@ export function PlanningView() {
           },
         ]}
       />
+      {showMemoryDrawer && (
+        <TravelMemoryDrawer onClose={() => setShowMemoryDrawer(false)} />
+      )}
     </div>
   )
 }
