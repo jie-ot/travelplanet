@@ -11,8 +11,10 @@ import {
 import { PlanningProgress } from "@/components/shared/planning-progress"
 import { PlanningModelSelector } from "@/components/shared/planning-model-selector"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
+import { MemoryEntryButton } from "@/components/shared/memory-entry-button"
+import { TravelMemoryDrawer } from "@/components/shared/travel-memory-drawer"
 import { usePlanningProgress } from "@/lib/use-planning-progress"
-import { Sparkles, Save, RotateCcw, History, Send } from "lucide-react"
+import { History, Sparkles, Save, RotateCcw, Send } from "lucide-react"
 import type { PlanningBrief, PlanningChecklistItem, PlanningModel } from "@/types"
 
 const DEFAULT_PLANNING_MODEL: PlanningModel = "doubao-seed-2.0-pro"
@@ -59,6 +61,7 @@ export function PlanningView() {
     useState<PlanningModel>(DEFAULT_PLANNING_MODEL)
   const [refinementModelLocked, setRefinementModelLocked] = useState(false)
   const [generationRequested, setGenerationRequested] = useState(false)
+  const [showMemoryDrawer, setShowMemoryDrawer] = useState(false)
   // 未保存草稿返回拦截（规范 §10.5）
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
   const pendingLeave = useRef<(() => void) | null>(null)
@@ -253,21 +256,25 @@ export function PlanningView() {
       <TopBar
         title={editingPlanId ? "重新编辑规划" : "旅行规划"}
         onBack={() => guardedLeave(() => leavePlanning(goBack))}
+        showUserBadge={false}
         right={
-          <button
-            type="button"
-            onClick={() =>
-              guardedLeave(() =>
-                leavePlanning(() =>
-                  editingPlanId ? goBack() : navigate({ page: "history" }),
-                ),
-              )
-            }
-            className="ui-pressable flex min-h-11 items-center gap-1.5 rounded-full bg-card/94 px-3.5 py-2 text-xs font-semibold text-foreground shadow-sm ring-1 ring-border/80"
-          >
-            <History className="h-3.5 w-3.5 text-primary" aria-hidden />
-            历史规划
-          </button>
+          <div className="flex w-full items-center justify-end gap-1.5">
+            <button
+              type="button"
+              onClick={() =>
+                guardedLeave(() =>
+                  leavePlanning(() =>
+                    editingPlanId ? goBack() : navigate({ page: "history" }),
+                  ),
+                )
+              }
+              className="ui-pressable flex h-10 shrink-0 items-center justify-center gap-1 rounded-full bg-card/94 px-3 text-[0.7rem] font-semibold text-foreground shadow-sm ring-1 ring-border/80 min-[400px]:h-11 min-[400px]:gap-1.5 min-[400px]:px-3.5 min-[400px]:text-xs"
+            >
+              <History className="h-3.5 w-3.5 text-primary" aria-hidden />
+              历史规划
+            </button>
+            <MemoryEntryButton onClick={() => setShowMemoryDrawer(true)} />
+          </div>
         }
       />
 
@@ -422,6 +429,9 @@ export function PlanningView() {
           },
         ]}
       />
+      {showMemoryDrawer && (
+        <TravelMemoryDrawer onClose={() => setShowMemoryDrawer(false)} />
+      )}
     </div>
   )
 }

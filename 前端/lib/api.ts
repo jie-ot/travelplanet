@@ -12,6 +12,7 @@ import type {
   PlanningResponse,
   PostcardGroup,
   Report,
+  TravelMemoryDisplay,
   UploadedPhoto,
 } from "@/types"
 import { realApi } from "./real-api"
@@ -55,6 +56,13 @@ export interface TravelApi {
   createPlan(input: { itineraryData: ItineraryData }): Promise<Plan>
   updatePlan(id: string, input: { itineraryData: ItineraryData }): Promise<Plan>
 
+  // 旅行记忆展示
+  getTravelMemory(): Promise<TravelMemoryDisplay>
+  updateTravelMemoryOverview(input: { title: string; content: string }): Promise<TravelMemoryDisplay>
+  updateTravelMemoryDescription(id: string, input: { title: string; content: string }): Promise<TravelMemoryDisplay>
+  updateTravelMemoryPlanningPreferences(input: { transport: string; hotel: string; attractions: string; food: string; pace: string; other: string }): Promise<TravelMemoryDisplay>
+  deleteTravelMemoryDescription(id: string): Promise<TravelMemoryDisplay>
+
   // 删除
   deletePostcardGroup(id: string): Promise<void>
   deleteReport(id: string): Promise<void>
@@ -87,6 +95,21 @@ export function createPlan(input: { itineraryData: ItineraryData }): Promise<Pla
 }
 export function updatePlan(id: string, input: { itineraryData: ItineraryData }): Promise<Plan> {
   return realApi.updatePlan(id, input)
+}
+export function getTravelMemory(): Promise<TravelMemoryDisplay> {
+  return realApi.getTravelMemory()
+}
+export function updateTravelMemoryOverview(input: { title: string; content: string }): Promise<TravelMemoryDisplay> {
+  return realApi.updateTravelMemoryOverview(input)
+}
+export function updateTravelMemoryDescription(id: string, input: { title: string; content: string }): Promise<TravelMemoryDisplay> {
+  return realApi.updateTravelMemoryDescription(id, input)
+}
+export function updateTravelMemoryPlanningPreferences(input: { transport: string; hotel: string; attractions: string; food: string; pace: string; other: string }): Promise<TravelMemoryDisplay> {
+  return realApi.updateTravelMemoryPlanningPreferences(input)
+}
+export function deleteTravelMemoryDescription(id: string): Promise<TravelMemoryDisplay> {
+  return realApi.deleteTravelMemoryDescription(id)
 }
 export function deletePostcardGroup(id: string): Promise<void> {
   return realApi.deletePostcardGroup(id)
