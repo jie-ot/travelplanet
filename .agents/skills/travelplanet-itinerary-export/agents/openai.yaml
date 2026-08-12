@@ -1,0 +1,4 @@
+interface:
+  display_name: "紧凑行程长图设计"
+  short_description: "将景点美食概览和每日一句话整理为单卡紧凑行程长图"
+  default_prompt: "Use $travelplanet-itinerary-export to design and validate a compact itinerary image with a complete title, centered overview labels, and all days in one arrow-free schedule card."

@@ -29,6 +29,7 @@ interface PlanningConversationProps {
   busy: boolean
   planningModel: PlanningModel
   modelLocked: boolean
+  confirmationReady: boolean
   onChange: (value: string) => void
   onModelChange: (model: PlanningModel) => void
   onSend: () => void
@@ -45,6 +46,7 @@ export function PlanningConversation({
   busy,
   planningModel,
   modelLocked,
+  confirmationReady,
   onChange,
   onModelChange,
   onSend,
@@ -215,12 +217,12 @@ export function PlanningConversation({
                 <button
                   type="button"
                   onClick={onConfirm}
-                  disabled={busy}
+                  disabled={busy || !confirmationReady}
                   className="ui-pressable flex min-h-12 items-center justify-center gap-2 rounded-full bg-primary px-5 text-sm font-semibold text-primary-foreground shadow-[0_14px_26px_-18px_rgba(7,143,171,0.9)] disabled:opacity-60"
                   data-testid="confirm-and-generate"
                 >
                   <Sparkles className="h-4 w-4" aria-hidden />
-                  确认无误，生成行程
+                  {confirmationReady ? "确认无误，生成行程" : "正在更新确认清单"}
                 </button>
                 <button
                   type="button"

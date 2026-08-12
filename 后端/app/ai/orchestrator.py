@@ -65,6 +65,11 @@ _MAX_TOOL_CALLS_TOTAL = 75
 _MAX_INTAKE_TOOL_ROUNDS = 1
 _MAX_INTAKE_TOOL_CALLS_TOTAL = 8
 _INTAKE_REASONING_EFFORT = "low"
+# The structured previousBrief is the cumulative source of truth. Replaying a
+# large transcript wastes tokens and can make old wording override a recent
+# correction, so intake only receives a short conversational tail.
+_MAX_INTAKE_MESSAGES = 8
+_MAX_INTAKE_MESSAGE_CHARS = 1200
 # A full itinerary is ~12k tokens of JSON and a thinking model spends as much
 # again on reasoning first. At 16k the 2026-08-07 flash run twice hit
 # finish_reason=length with an empty message and had to be retried without
@@ -1892,9 +1897,9 @@ def collect_planning_requirements(
     bounded_messages = [
         {
             "role": message.role,
-            "content": message.content.strip()[:1600],
+            "content": message.content.strip()[:_MAX_INTAKE_MESSAGE_CHARS],
         }
-        for message in messages[-16:]
+        for message in messages[-_MAX_INTAKE_MESSAGES:]
         if message.content.strip()
     ]
     user_text = json.dumps(

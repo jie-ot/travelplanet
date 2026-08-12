@@ -35,6 +35,8 @@ export interface PlanWithAIInput {
   messages?: PlanningChatMessage[]
   brief?: PlanningBrief | null
   confirmed?: boolean
+  /** Must match the latest server-authored confirmation checklist. */
+  confirmationToken?: string | null
   /** 客户端生成的进度令牌；带上后可用 getPlanningProgress 轮询真实阶段。 */
   progressToken?: string
 }

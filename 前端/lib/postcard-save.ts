@@ -32,6 +32,19 @@ export async function saveTravelImage(
   await downloadInBrowser(imageUrl, fileName)
 }
 
+export async function saveTravelImageBlob(
+  blob: Blob,
+  title: string,
+  fallbackName = "旅行图片",
+): Promise<void> {
+  const objectUrl = URL.createObjectURL(blob)
+  try {
+    await saveTravelImage(objectUrl, title, fallbackName)
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
 async function downloadInBrowser(imageUrl: string, fileName: string): Promise<void> {
   const response = await fetch(imageUrl)
   if (!response.ok) throw new Error("图片下载失败")
