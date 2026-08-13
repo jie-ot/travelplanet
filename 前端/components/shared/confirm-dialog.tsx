@@ -56,7 +56,10 @@ export function ConfirmDialog({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/42 px-6 backdrop-blur-md animate-in fade-in"
-      onClick={onClose}
+      onClick={(event) => {
+        event.stopPropagation()
+        onClose()
+      }}
     >
       <div
         role="dialog"

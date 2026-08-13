@@ -117,15 +117,16 @@ def _merge_memory(
 ) -> None:
     """Deterministic implicit-traits增量 in an independent transaction.
 
-    A memory failure is logged and swallowed — it must not roll back the Plan.
+    Extraction and merge both live in this isolation boundary. A memory
+    failure is logged and swallowed — it must not change an already-saved Plan.
     """
-    destination = data.trip_info.destination.strip()
-    if not destination:
-        return
-    preferences = _memory_preferences_from_itinerary(data)
-    if not preferences:
-        preferences = ["偏好围绕明确目的地组织可执行的旅行计划"]
     try:
+        destination = data.trip_info.destination.strip()
+        if not destination:
+            return
+        preferences = _memory_preferences_from_itinerary(data)
+        if not preferences:
+            preferences = ["偏好围绕明确目的地组织可执行的旅行计划"]
         with session_scope() as session:
             memory_service.merge_memory_update(
                 session,
@@ -142,7 +143,7 @@ def _merge_memory(
 
 
 def _memory_preferences_from_itinerary(data: ItineraryData) -> list[str]:
-    """Derive stable travel preferences from itinerary content, not destinations."""
+    """Derive stable travel preferences from current itinerary fields."""
     exp = data.experience_summary
     texts: list[str] = []
     tags: list[str] = []
@@ -154,7 +155,7 @@ def _memory_preferences_from_itinerary(data: ItineraryData) -> list[str]:
     for day in data.itinerary:
         texts.append(day.title or "")
         for schedule in day.schedules:
-            texts.extend([schedule.activity, schedule.note or "", schedule.place_name or ""])
+            texts.extend([schedule.activity, schedule.place_name or ""])
             tags.extend(schedule.tags)
 
     corpus = " ".join([text for text in texts + tags if text])

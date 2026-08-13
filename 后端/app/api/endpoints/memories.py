@@ -133,10 +133,9 @@ def update_travel_memory_overview(
 
     memory = get_or_create_current_memory(session, current_user_id)
     mem_json = dict(memory.memory_json or {})
-    mem_json.pop("display_overview", None)
+    mem_json["display_overview"] = {"title": title, "content": content}
     memory.memory_json = mem_json
     flag_modified(memory, "memory_json")
-    memory.memory_text = content
     memory.version = int(memory.version) + 1
     memory.last_source_type = "manual"
     memory.last_source_id = "travel_memory_overview"

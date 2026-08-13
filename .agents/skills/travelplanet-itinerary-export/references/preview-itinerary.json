@@ -1,0 +1,159 @@
+{
+  "trip_info": {
+    "destination": "北京、承德",
+    "start_date": "2026-08-20",
+    "end_date": "2026-08-24",
+    "date_label": "2026.8.20 - 2026.8.24"
+  },
+  "preparations": [{ "category": "证件", "items": "身份证" }],
+  "bookings": [{ "type": "机票", "details": "勿上图" }],
+  "food_recommendations": ["推荐北京烤鸭", "承德杏仁茶"],
+  "experience_summary": {
+    "tripTheme": "京承文化行",
+    "pace": "适中",
+    "intensity": 62,
+    "highlights": ["故宫", "天坛", "避暑山庄"],
+    "weatherSummary": "晴热",
+    "personalizationTags": ["历史", "文化"]
+  },
+  "itinerary": [
+    {
+      "id": "day_1",
+      "date": "2026-08-20",
+      "title": "北京文化日（晴热）",
+      "schedules": [
+        {
+          "id": "sch_1",
+          "time_period": "上午",
+          "start_time": "08:30",
+          "end_time": "11:30",
+          "activity": "参观故宫博物院",
+          "place_name": "故宫博物院",
+          "travel_minutes": 25,
+          "transport_mode": "transit",
+          "tags": ["历史", "文化", "博物馆"]
+        },
+        {
+          "id": "sch_2",
+          "time_period": "下午",
+          "start_time": "14:00",
+          "end_time": "16:30",
+          "activity": "游览天坛公园",
+          "place_name": "天坛公园",
+          "travel_minutes": 20,
+          "transport_mode": "walking",
+          "tags": ["景区", "历史"]
+        },
+        {
+          "id": "sch_3",
+          "time_period": "傍晚",
+          "start_time": "17:00",
+          "end_time": "18:30",
+          "activity": "漫步前门大街",
+          "place_name": "前门大街",
+          "travel_minutes": 15,
+          "transport_mode": "walking",
+          "tags": ["街区"]
+        },
+        {
+          "id": "sch_4",
+          "time_period": "晚上",
+          "activity": "入住北京饭店",
+          "place_name": "北京饭店",
+          "tags": ["住宿"]
+        }
+      ]
+    },
+    {
+      "id": "day_2",
+      "date": "2026-08-21",
+      "title": "国家博物馆",
+      "schedules": [
+        {
+          "id": "sch_5",
+          "time_period": "上午",
+          "start_time": "09:00",
+          "end_time": "12:00",
+          "activity": "参观中国国家博物馆",
+          "place_name": "中国国家博物馆",
+          "travel_minutes": 20,
+          "transport_mode": "transit",
+          "tags": ["博物馆", "文化"]
+        }
+      ]
+    },
+    {
+      "id": "day_3",
+      "date": "2026-08-22",
+      "title": "北京前往承德",
+      "schedules": [
+        {
+          "id": "sch_6",
+          "time_period": "上午",
+          "start_time": "08:00",
+          "end_time": "10:30",
+          "activity": "乘坐高铁前往承德南站",
+          "place_name": "北京朝阳站",
+          "tags": ["大交通"]
+        },
+        {
+          "id": "sch_7",
+          "time_period": "下午",
+          "start_time": "14:00",
+          "end_time": "16:30",
+          "activity": "参观普陀宗乘之庙",
+          "place_name": "普陀宗乘之庙",
+          "travel_minutes": 30,
+          "transport_mode": "driving",
+          "tags": ["景区", "历史"]
+        },
+        {
+          "id": "sch_8",
+          "time_period": "晚上",
+          "activity": "入住承德山庄酒店",
+          "place_name": "承德山庄酒店",
+          "tags": ["住宿"]
+        }
+      ]
+    },
+    {
+      "id": "day_4",
+      "date": "2026-08-23",
+      "title": "避暑山庄",
+      "schedules": [
+        {
+          "id": "sch_9",
+          "time_period": "上午",
+          "start_time": "08:30",
+          "end_time": "16:00",
+          "activity": "全天游览避暑山庄",
+          "place_name": "避暑山庄",
+          "travel_minutes": 15,
+          "transport_mode": "walking",
+          "tags": ["景区", "风景"]
+        }
+      ]
+    },
+    {
+      "id": "day_5",
+      "date": "2026-08-24",
+      "title": "返程武汉",
+      "schedules": [
+        {
+          "id": "sch_10",
+          "time_period": "上午",
+          "activity": "办理退房后前往机场",
+          "place_name": "承德山庄酒店",
+          "tags": ["住宿"]
+        },
+        {
+          "id": "sch_11",
+          "time_period": "下午",
+          "activity": "乘坐MU2485航班返回武汉天河国际机场",
+          "place_name": "首都机场",
+          "tags": ["大交通"]
+        }
+      ]
+    }
+  ]
+}

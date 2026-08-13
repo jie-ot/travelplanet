@@ -65,6 +65,10 @@ _MAX_TOOL_CALLS_TOTAL = 75
 _MAX_INTAKE_TOOL_ROUNDS = 1
 _MAX_INTAKE_TOOL_CALLS_TOTAL = 8
 _INTAKE_REASONING_EFFORT = "low"
+# Flash final synthesis used to inherit DeepSeek's runtime default (high) and
+# spend the 32k budget on reasoning with an empty itinerary body. Research
+# stays low; only this tool-free final draft is pinned to low for Flash.
+_FLASH_GENERATION_REASONING_EFFORT = "low"
 # The structured previousBrief is the cumulative source of truth. Replaying a
 # large transcript wastes tokens and can make old wording override a recent
 # correction, so intake only receives a short conversational tail.
@@ -1133,8 +1137,8 @@ def plan_itinerary(
     fact_pack: dict[str, Any] | None = None,
     execute_tool: ToolExecutor | None = None,
     planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
-) -> ItineraryData:
-    """Planning → full ItineraryData.
+) -> tuple[ItineraryData, dict[str, Any]]:
+    """Planning → full ItineraryData plus retained tool facts for map projection.
 
     With `execute_tool`, run a bounded function-calling loop so the model can
     choose the model-specific whitelist tools and
@@ -1162,7 +1166,7 @@ def plan_itinerary(
         _load_planning_prompt(planning_model, include_tools=False),
         user_text,
         planning_model=planning_model,
-    )
+    ), {}
 
 
 def _load_planning_prompt(
@@ -1388,7 +1392,7 @@ def _plan_with_tools(
     execute_tool: ToolExecutor,
     *,
     planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
-) -> ItineraryData:
+) -> tuple[ItineraryData, dict[str, Any]]:
     """Research protocol: declare scope → gather/select facts → finish → final + audit."""
     research_prompt = _load_planning_prompt(planning_model, include_tools=True)
     generation_prompt = _load_planning_prompt(planning_model, include_tools=False)
@@ -1477,10 +1481,10 @@ def _plan_with_tools(
             stage="planning_research",
             max_completion_tokens=_MAX_GENERATION_TOKENS,
             planning_model=planning_model,
-            # DeepSeek keeps its provider default (high); Doubao research stays low.
+            # Only DeepSeek Pro research uses high; Flash and Doubao stay low.
             reasoning_effort=(
                 "high"
-                if planning_model in DEEPSEEK_PLANNING_MODELS
+                if planning_model == "deepseek-v4-pro"
                 else _RESEARCH_REASONING_EFFORT
             ),
         )
@@ -1871,12 +1875,15 @@ def _plan_with_tools(
     # is enforced deterministically below and needs no model round, so the audit
     # was removed rather than kept as the single largest cost in the pipeline.
     planning_progress.report("verifying")
-    return _repair_itinerary_violations(
-        system_prompt=generation_prompt,
-        user_text=user_text,
-        itinerary=final_data,
-        retained_facts=retained_facts,
-        planning_model=planning_model,
+    return (
+        _repair_itinerary_violations(
+            system_prompt=generation_prompt,
+            user_text=user_text,
+            itinerary=final_data,
+            retained_facts=retained_facts,
+            planning_model=planning_model,
+        ),
+        retained_facts,
     )
 
 
@@ -2909,9 +2916,15 @@ def _generate_itinerary_from_research(
             if planning_model in DEEPSEEK_PLANNING_MODELS
             else None
         ),
-        # Final synthesis is where flight times, route evidence and daily pacing
-        # have to be reconciled against each other, so thinking stays on.
+        # Final synthesis keeps thinking on, but Flash must not fall through to
+        # DeepSeek's default high effort — that burns the token budget on
+        # reasoning and returns an empty itinerary body. Pro stays high.
         thinking_enabled=None,
+        reasoning_effort=(
+            _FLASH_GENERATION_REASONING_EFFORT
+            if planning_model == "deepseek-v4-flash"
+            else None
+        ),
     )
     if final.content:
         log_event(

@@ -220,7 +220,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             protocol="declare_scope_fact_state_finish_audit_v1",
             planning_model=request.planning_model,
         ):
-            new_data = orchestrator.plan_itinerary(
+            new_data, retained_facts = orchestrator.plan_itinerary(
                 message=planning_message,
                 context=request.context,
                 memory_summary=memory_summary,
@@ -258,6 +258,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             aligned = daily_map_service.enrich_daily_maps(
                 aligned,
                 request.planning_model,
+                facts=retained_facts,
             )
         log_event(
             "planning_result",

@@ -1,12 +1,18 @@
 import type { DailyItinerary, ItineraryData, Schedule } from "@/types"
+import { classifySchedule } from "@/lib/schedule-kind"
 
 const WIDTH = 1080
 const PADDING = 64
 const CONTENT_WIDTH = WIDTH - PADDING * 2
 const MAX_HEIGHT = 18_000
-const DAY_TITLE_MAX = 9
 const BODY_FONT = '"Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif'
 const ART_FONT = '"STKaiti", "KaiTi", "FangSong", "Songti SC", serif'
+const TRANSPORT_LABELS: Record<string, string> = {
+  walking: "步行",
+  transit: "公交地铁",
+  driving: "打车",
+  bicycling: "骑行",
+}
 
 const COLORS = {
   navy: "#073b56",
@@ -23,27 +29,23 @@ const COLORS = {
   white: "#ffffff",
 } as const
 
-type CompactNode = {
-  period: string
+export type PosterEvent = {
+  travelLine: string | null
+  timeLabel: string
   place: string
-  activity: string
-  logistics: boolean
-  dining: boolean
 }
 
-type CompactDay = {
+export type CompactDay = {
   date: string
   title: string
-  nodes: CompactNode[]
-  summary: string
+  events: PosterEvent[]
 }
 
-type CompactContent = {
+export type CompactContent = {
   title: string
   subtitle: string
   attractions: string[]
   foods: string[]
-  stations: string[]
   days: CompactDay[]
 }
 
@@ -53,25 +55,34 @@ type HeaderMetrics = {
   titleLineHeight: number
   titleLines: string[]
   subtitleFontSize: number
+  subtitleLines: string[]
+}
+
+type EventBlockMetrics = {
+  travelLines: string[]
+  bodyLines: string[]
 }
 
 type DayRowMetrics = {
   height: number
-  summaryLines: string[]
+  titleLines: string[]
+  eventBlocks: EventBlockMetrics[]
 }
 
 export function getItineraryImageDiagnostics(data: ItineraryData) {
-  const compact = buildCompactContent(data)
+  const compact = buildItineraryPosterContent(data)
   const bodyCopy = [
     ...compact.attractions,
     ...compact.foods,
-    ...compact.days.flatMap((day) => [day.title, day.summary]),
+    ...compact.days.flatMap((day) => [
+      day.title,
+      ...day.events.flatMap((event) => [event.travelLine || "", event.timeLabel, event.place]),
+    ]),
   ].join("")
   return {
     bodyCharacters: visibleLength(bodyCopy),
     dayCount: compact.days.length,
-    stationCount: compact.stations.length,
-    scheduleCount: compact.days.reduce((total, day) => total + day.nodes.length, 0),
+    scheduleCount: compact.days.reduce((total, day) => total + day.events.length, 0),
     attractionCount: compact.attractions.length,
     foodCount: compact.foods.length,
   }
@@ -80,7 +91,7 @@ export function getItineraryImageDiagnostics(data: ItineraryData) {
 export async function renderItineraryImage(data: ItineraryData): Promise<Blob> {
   await document.fonts?.ready
 
-  const compact = buildCompactContent(data)
+  const compact = buildItineraryPosterContent(data)
   const measureCanvas = document.createElement("canvas")
   const measure = measureCanvas.getContext("2d")
   if (!measure) throw new Error("当前浏览器无法生成行程长图")
@@ -126,7 +137,7 @@ export async function renderItineraryImage(data: ItineraryData): Promise<Blob> {
   })
 }
 
-function buildCompactContent(data: ItineraryData): CompactContent {
+export function buildItineraryPosterContent(data: ItineraryData): CompactContent {
   const destination = cleanText(data.trip_info.destination) || "旅行"
   const dayCount = data.itinerary.length
   const theme = cleanText(data.experience_summary?.tripTheme || "")
@@ -134,181 +145,121 @@ function buildCompactContent(data: ItineraryData): CompactContent {
   const date = cleanText(data.trip_info.date_label)
   const subtitle = [date, dayCount && !/天/u.test(date) ? `${dayCount}天` : ""].filter(Boolean).join(" · ")
 
-  const days = data.itinerary.map((day, dayIndex) => buildCompactDay(day, dayIndex))
-  const selectedNodes = days.flatMap((day) => day.nodes)
+  const days = data.itinerary.map((day, dayIndex) => buildPosterDay(day, dayIndex))
   const attractions = unique(
-    selectedNodes
-      .filter((node) => !node.logistics && !node.dining)
-      .map((node) => shorten(node.place, 14)),
-  ).slice(0, 9)
-  const foods = collectFoods(data, selectedNodes).slice(0, 6)
-  const stations = unique(selectedNodes.filter((node) => node.logistics).map((node) => node.place))
+    data.itinerary.flatMap((day) =>
+      day.schedules
+        .filter((schedule) => classifySchedule(schedule) === "attraction")
+        .map((schedule) => cleanText(schedule.place_name || ""))
+        .filter(Boolean),
+    ),
+  )
+  const foods = collectFoods(data)
 
-  return { title, subtitle, attractions, foods, stations, days }
+  return { title, subtitle, attractions, foods, days }
 }
 
-function buildCompactDay(day: DailyItinerary, dayIndex: number): CompactDay {
-  const selected = selectCoreSchedules(day)
-  const nodes = selected.map((schedule) => ({
-    period: broadPeriod(schedule),
-    place: schedulePlace(schedule),
-    activity: scheduleActivity(schedule),
-    logistics: isLogisticsOnly(schedule),
-    dining: isDiningSchedule(schedule),
-  }))
-
+function buildPosterDay(day: DailyItinerary, dayIndex: number): CompactDay {
   return {
     date: cleanText(day.date),
     title: cleanDayTitle(day.title || `第 ${dayIndex + 1} 天`),
-    nodes,
-    summary: summarizeDay(nodes),
+    events: day.schedules.map((schedule) => projectSchedule(schedule)),
   }
 }
 
 function cleanDayTitle(value: string): string {
-  const withoutNotes = cleanText(value).replace(/[（(].*$/u, "").trim()
-  const firstClause = withoutNotes.split(/[，,；;]/u)[0]?.trim() || withoutNotes
-  return shorten(firstClause || "当日行程", DAY_TITLE_MAX)
+  const withoutNotes = cleanText(value).replace(/[（(][^）)]*[）)]/gu, "").trim()
+  return withoutNotes || "当日行程"
 }
 
-function summarizeDay(nodes: CompactNode[]): string {
-  const sightseeingNodes = nodes.filter((node) => !node.logistics && !node.dining)
-  const activityNodes = nodes.filter((node) => !node.logistics)
-  const source = sightseeingNodes.length ? sightseeingNodes : activityNodes.length ? activityNodes : nodes
-  if (!source.length) return "当天暂无具体日程。"
-
-  const selected = evenlySelect(source, Math.min(2, source.length))
-  const clauses = selected.map((node) => `${node.period}${summaryAction(node)}`)
-  return `${clauses.join("，")}。`
-}
-
-function summaryAction(node: CompactNode): string {
-  if (node.dining) return `品尝${shorten(node.place, 12)}`
-  if (node.logistics) {
-    if (/退房/u.test(node.activity)) return "办理退房"
-    if (/返程|返回/u.test(node.activity)) return `从${shorten(node.place, 10)}返程`
-    if (/抵达|到达/u.test(node.activity)) return `抵达${shorten(node.place, 10)}`
-    return `前往${shorten(node.place, 10)}`
+function projectSchedule(schedule: Schedule): PosterEvent {
+  const place = schedulePlace(schedule)
+  return {
+    travelLine: travelLine(schedule, place),
+    timeLabel: timeLabel(schedule),
+    place,
   }
-  const place = shorten(node.place, 12)
-  if (/骑行/u.test(node.activity)) return `骑行游览${place}`
-  if (/参观/u.test(node.activity)) return `参观${place}`
-  if (/漫步|步行|逛/u.test(node.activity)) return `漫步${place}`
-  if (/登山|登上|攀登|爬山/u.test(node.activity)) return `登临${place}`
-  if (/观看|观赏|看/u.test(node.activity)) return `观赏${place}`
-  return `游览${place}`
 }
 
-function selectCoreSchedules(day: DailyItinerary): Schedule[] {
-  const source = day.schedules.filter((schedule) => schedulePlace(schedule))
-  if (source.length <= 4) return source
-
-  const activities = source.filter((schedule) => !isLogisticsOnly(schedule))
-  const selected: Schedule[] = []
-  const firstLogistics = source.find((schedule) => isLogisticsOnly(schedule))
-  const lastLogistics = [...source].reverse().find((schedule) => isLogisticsOnly(schedule))
-
-  if (firstLogistics && source.indexOf(firstLogistics) === 0) selected.push(firstLogistics)
-  for (const schedule of evenlySelect(activities, Math.max(1, 4 - selected.length))) {
-    if (!selected.includes(schedule)) selected.push(schedule)
+function timeLabel(schedule: Schedule): string {
+  const start = cleanText(schedule.start_time || "")
+  const end = cleanText(schedule.end_time || "")
+  if (start && end) {
+    const stay = classifySchedule(schedule) === "transport" ? null : stayLabel(start, end)
+    return stay ? `${start}–${end}（停留 ${stay}）` : `${start}–${end}`
   }
-  if (lastLogistics && source.indexOf(lastLogistics) === source.length - 1 && !selected.includes(lastLogistics)) {
-    if (selected.length >= 4) selected.pop()
-    selected.push(lastLogistics)
-  }
-  return selected.sort((a, b) => source.indexOf(a) - source.indexOf(b)).slice(0, 4)
+  if (start) return start
+  return cleanText(schedule.time_period) || "灵活"
 }
 
-function evenlySelect<T>(items: T[], count: number): T[] {
-  if (items.length <= count) return items
-  if (count <= 1) return items.slice(0, 1)
-  return Array.from({ length: count }, (_, index) => {
-    const sourceIndex = Math.round((index * (items.length - 1)) / (count - 1))
-    return items[sourceIndex]
-  })
+function stayLabel(start: string, end: string): string | null {
+  const startMinutes = parseClock(start)
+  const endMinutes = parseClock(end)
+  if (startMinutes == null || endMinutes == null || endMinutes <= startMinutes) return null
+  return formatDuration(endMinutes - startMinutes)
 }
 
-function collectFoods(data: ItineraryData, nodes: CompactNode[]): string[] {
-  const recommendations = (data.food_recommendations || []).flatMap(extractFoodCandidates)
-  const scheduled = nodes.flatMap((node) => extractFoodCandidates(node.activity))
-  return unique([...scheduled, ...recommendations]).filter(isDishLike)
+function parseClock(value: string): number | null {
+  const match = value.match(/^(\d{1,2}):(\d{2})$/u)
+  if (!match) return null
+  return Number(match[1]) * 60 + Number(match[2])
 }
 
-function extractFoodCandidates(value: string): string[] {
-  let text = stripSensitiveDetail(value)
-    .replace(/\.{2,}|…+/gu, "")
-    .replace(/[（(][^）)]*(?:推荐|地址|人均|营业|门店)[^）)]*[）)]/gu, "")
-  const colonIndex = Math.max(text.lastIndexOf("："), text.lastIndexOf(":"))
-  if (colonIndex >= 0 && colonIndex < text.length - 1) text = text.slice(colonIndex + 1)
-  const foodMatch = text.match(/(?:品尝|享用|吃|用餐|推荐)[:：]?([^。；;]+)/u)
-  if (foodMatch) text = foodMatch[1]
-  return text
-    .split(/[、，,；;/]|(?:和|与)/u)
-    .map(cleanFoodName)
-    .filter(Boolean)
+function formatDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  if (rest === 0) return `${hours} 小时`
+  return `${hours} 小时 ${rest} 分`
+}
+
+function travelLine(schedule: Schedule, place: string): string | null {
+  const minutes = schedule.travel_minutes
+  if (!minutes || minutes <= 0) return null
+  const modeLabel = TRANSPORT_LABELS[schedule.transport_mode || ""]
+  const transportMatch = cleanText(schedule.transport || "").match(/(步行|地铁|公交|打车|出租车|网约车|骑行)/u)
+  const verb =
+    modeLabel ||
+    (transportMatch
+      ? transportMatch[1] === "出租车" || transportMatch[1] === "网约车"
+        ? "打车"
+        : transportMatch[1]
+      : "")
+  const destination = place || "下一地点"
+  if (!verb) return `约 ${minutes} 分钟前往${destination}`
+  return `${verb} ${minutes} 分钟前往${destination}`
+}
+
+function collectFoods(data: ItineraryData): string[] {
+  const recommendations = (data.food_recommendations || []).map(cleanFoodName).filter(Boolean)
+  const scheduled = data.itinerary.flatMap((day) =>
+    day.schedules
+      .filter((schedule) => classifySchedule(schedule) === "dining")
+      .map((schedule) => cleanFoodName(schedule.place_name || ""))
+      .filter(Boolean),
+  )
+  return unique([...recommendations, ...scheduled])
 }
 
 function cleanFoodName(value: string): string {
-  return shorten(
-    cleanText(value)
-      .replace(/^(?:早餐|午餐|晚餐|美食|当地特色)[:：]?/u, "")
-      .replace(/[（(][^）)]*[）)]/gu, "")
-      .trim(),
-    12,
-  )
-}
-
-function isDishLike(value: string): boolean {
-  if (/酒店|宾馆|客栈/u.test(value)) return false
-  return /汤|包|饭|面|粉|饼|肉|鸡|鸭|鹅|鱼|虾|蟹|菜|锅贴|烧烤|火锅|小吃|米线|饵丝|乳扇|粑粑|茶|咖啡|甜品|酒吧|酒馆|啤酒|米酒/u.test(value)
-}
-
-function isDiningSchedule(schedule: Schedule): boolean {
-  const activity = cleanText(schedule.activity)
-  const place = cleanText(schedule.place_name || schedule.map_label || "")
-  if (/酒店|宾馆|客栈/u.test(place)) return false
-  if (/餐厅|饭店|食馆|小吃店|烧烤店|咖啡店|茶馆/u.test(place) || isDishLike(place)) return true
-  return /^(?:上午|中午|午后|下午|傍晚|夜间|晚上)?\s*(?:在.+)?(?:早餐|午餐|晚餐|品尝|享用|用餐|就餐)/u.test(activity)
-}
-
-function isLogisticsOnly(schedule: Schedule): boolean {
-  const text = `${schedule.place_name || ""} ${schedule.activity || ""} ${schedule.transport || ""}`
-  const locationOnly = /(?:火车站|高铁站|客运站|汽车站|机场|航站楼|码头|港口|地铁站|车站|[\p{Script=Han}]{2,10}站|酒店|宾馆|客栈)/u.test(text)
-  const transferOnly = /(?:乘坐|搭乘|换乘|抵达|到达|出发|返程|办理入住|酒店入住|办理退房)/u.test(text)
-  return locationOnly || (Boolean(schedule.transport) && transferOnly)
-}
-
-function broadPeriod(schedule: Schedule): string {
-  const source = `${schedule.time_period || ""} ${schedule.start_time || ""}`
-  if (/上午|早晨|清晨|早餐/u.test(source)) return "上午"
-  if (/中午|午餐/u.test(source)) return "中午"
-  if (/下午|午后/u.test(source)) return "午后"
-  if (/傍晚|黄昏/u.test(source)) return "傍晚"
-  if (/晚上|夜间|夜晚|晚餐/u.test(source)) return "夜间"
-  const match = source.match(/(?:^|\s)(\d{1,2}):\d{2}/u)
-  if (!match) return "灵活"
-  const hour = Number(match[1])
-  if (hour < 12) return "上午"
-  if (hour < 17) return "午后"
-  if (hour < 20) return "傍晚"
-  return "夜间"
+  return cleanText(value).replace(/^推荐/u, "").trim()
 }
 
 function schedulePlace(schedule: Schedule): string {
-  const source = cleanText(schedule.place_name || schedule.map_label || schedule.activity)
-  return shorten(stripSensitiveDetail(source), 18)
-}
-
-function scheduleActivity(schedule: Schedule): string {
-  return shorten(stripSensitiveDetail(schedule.activity), 30)
+  const source = cleanText(schedule.place_name || schedule.activity)
+  const kind = classifySchedule(schedule)
+  const stripped = stripSensitiveDetail(source)
+  if (kind === "hotel") {
+    if (/退房/u.test(schedule.activity || "")) return stripped ? `退房 ${stripped}` : "办理退房"
+    if (/入住/u.test(schedule.activity || "")) return stripped ? `入住 ${stripped}` : "办理入住"
+  }
+  return stripped
 }
 
 function stripSensitiveDetail(value: string): string {
   return cleanText(value)
     .replace(/\b(?:G|D|C|Z|T|K)\s?\d{1,5}\b/giu, "")
     .replace(/\b[A-Z]{2}\s?\d{3,4}\b/gu, "")
-    .replace(/\b\d{1,2}:\d{2}\b/gu, "")
-    .replace(/\d{1,2}时(?:\d{1,2}分)?/gu, "")
     .replace(/(?:¥|￥)\s?\d+(?:\.\d+)?/gu, "")
     .replace(/\d+(?:\.\d+)?\s?元/gu, "")
     .replace(/(?:商务座|一等座|二等座|硬座|软座|硬卧|软卧|经济舱|公务舱|头等舱)/gu, "")
@@ -334,11 +285,14 @@ function measureHeader(
   }
   const titleLineHeight = titleFontSize + 10
   let subtitleFontSize = 28
-  while (measureText(context, compact.subtitle, font(subtitleFontSize, 650)) > maxWidth && subtitleFontSize > 20) {
+  let subtitleLines = wrapText(context, compact.subtitle, maxWidth, font(subtitleFontSize, 650))
+  while (subtitleLines.length > 2 && subtitleFontSize > 20) {
     subtitleFontSize -= 1
+    subtitleLines = wrapText(context, compact.subtitle, maxWidth, font(subtitleFontSize, 650))
   }
-  const height = 40 + titleLines.length * titleLineHeight + 18 + subtitleFontSize + 48
-  return { height, titleFontSize, titleLineHeight, titleLines, subtitleFontSize }
+  const subtitleLineHeight = subtitleFontSize + 8
+  const height = 40 + titleLines.length * titleLineHeight + 18 + subtitleLines.length * subtitleLineHeight + 48
+  return { height, titleFontSize, titleLineHeight, titleLines, subtitleFontSize, subtitleLines }
 }
 
 function measureOverview(
@@ -367,11 +321,23 @@ function measureScheduleCard(
   days: CompactDay[],
   font: (size: number, weight?: number) => string,
 ) {
-  const summaryWidth = CONTENT_WIDTH - 360
+  const titleWidth = CONTENT_WIDTH - 140
+  const eventWidth = CONTENT_WIDTH - 120
   const rows = days.map((day) => {
-    const summaryLines = wrapText(context, day.summary, summaryWidth, font(24, 550))
-    const height = Math.max(112, 42 + summaryLines.length * 34)
-    return { height, summaryLines }
+    const titleLines = wrapText(context, day.title, titleWidth, font(26, 800))
+    const eventBlocks = day.events.map((event) => {
+      const travelLines = event.travelLine
+        ? wrapText(context, event.travelLine, eventWidth, font(22, 550))
+        : []
+      const bodyLines = wrapText(context, `${event.timeLabel}  ${event.place}`, eventWidth, font(24, 550))
+      return { travelLines, bodyLines }
+    })
+    const eventsHeight = eventBlocks.reduce(
+      (total, block) => total + block.travelLines.length * 30 + block.bodyLines.length * 34 + 10,
+      0,
+    )
+    const height = Math.max(120, 70 + titleLines.length * 34 + eventsHeight + 18)
+    return { height, titleLines, eventBlocks }
   })
   return {
     height: 28 + rows.reduce((total, row) => total + row.height, 0) + 28,
@@ -401,7 +367,15 @@ function drawHeader(
     metrics.titleLineHeight,
   )
   const subtitleY = titleY + metrics.titleLines.length * metrics.titleLineHeight + 12
-  drawText(context, [compact.subtitle], PADDING + 50, subtitleY, font(metrics.subtitleFontSize, 650), COLORS.muted, 36)
+  drawText(
+    context,
+    metrics.subtitleLines,
+    PADDING + 50,
+    subtitleY,
+    font(metrics.subtitleFontSize, 650),
+    COLORS.muted,
+    metrics.subtitleFontSize + 8,
+  )
   context.strokeStyle = COLORS.coral
   context.lineWidth = 5
   context.beginPath()
@@ -482,9 +456,17 @@ function drawScheduleCard(
     fillRoundedRect(context, PADDING + 46, rowY + 14, 54, 32, 16, pale)
     drawCenteredText(context, `D${index + 1}`, PADDING + 73, rowY + 30, font(18, 850), accent)
     drawText(context, [day.date], PADDING + 116, rowY + 16, font(20, 650), COLORS.muted, 28)
-    drawText(context, [day.title], PADDING + 46, rowY + 60, font(26, 800), COLORS.navy, 34)
+    drawText(context, row.titleLines, PADDING + 46, rowY + 56, font(26, 800), COLORS.navy, 34)
 
-    drawText(context, row.summaryLines, PADDING + 332, rowY + 25, font(24, 550), COLORS.ink, 34)
+    let eventY = rowY + 56 + row.titleLines.length * 34 + 8
+    row.eventBlocks.forEach((block) => {
+      if (block.travelLines.length) {
+        drawText(context, block.travelLines, PADDING + 46, eventY, font(22, 550), COLORS.muted, 30)
+        eventY += block.travelLines.length * 30
+      }
+      drawText(context, block.bodyLines, PADDING + 46, eventY, font(24, 550), COLORS.ink, 34)
+      eventY += block.bodyLines.length * 34 + 10
+    })
 
     if (index < days.length - 1) {
       context.strokeStyle = COLORS.line
@@ -611,12 +593,6 @@ function unique(values: string[]): string[] {
 
 function cleanText(value: string): string {
   return String(value || "").replace(/\s+/gu, " ").trim()
-}
-
-function shorten(value: string, maxLength: number): string {
-  const text = cleanText(value)
-  if (visibleLength(text) <= maxLength) return text
-  return `${Array.from(text).slice(0, Math.max(1, maxLength - 1)).join("")}…`
 }
 
 function visibleLength(value: string): number {

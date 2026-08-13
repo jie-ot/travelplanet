@@ -1,7 +1,8 @@
 """Display adapter for user-facing travel memory.
 
-The adapter formats existing `memory_json` / `memory_text` into a small set of
-editable notes. It avoids fixed profile categories and never exposes raw fields.
+The adapter formats `memory_json` into a small set of editable notes.
+`memory_text` is planning-prompt injection only and is not a display source.
+It avoids fixed profile categories and never exposes raw fields.
 """
 
 from __future__ import annotations
@@ -73,9 +74,13 @@ class MemoryDisplayAdapter:
                 continue
             seen_topics.add(topic)
             items.append(item)
-        is_empty = not items
-        overview_title, overview_content = self._overview(memory, items)
         planning_preferences = self._planning_preferences(memory)
+        overview_title, overview_content = self._overview(memory, items)
+        is_empty = not (
+            items
+            or self._has_custom_overview(memory)
+            or self._has_planning_preference_values(planning_preferences)
+        )
         return TravelMemoryDisplay(
             intro=self._intro(items),
             overview_title=overview_title,
@@ -118,12 +123,6 @@ class MemoryDisplayAdapter:
                 summary = self._summary_text(item)
                 if self._is_displayable(summary):
                     preferences.append(item)
-
-        if not preferences and not self._is_custom_overview_text(memory.memory_text):
-            preferences = [
-                {"summary": summary, "confidence": 0, "source_refs": []}
-                for summary in self._summaries_from_text(memory.memory_text)
-            ]
 
         visible = [pref for pref in preferences if not self._is_hidden(pref, hidden_ids)]
         return sorted(visible, key=lambda p: p.get("confidence", 0), reverse=True)
@@ -307,16 +306,6 @@ class MemoryDisplayAdapter:
     def _summary_text(self, item: dict) -> str:
         return str(item.get("summary") or item.get("key") or "").strip()
 
-    def _summaries_from_text(self, text: str | None) -> list[str]:
-        if not text:
-            return []
-        summaries: list[str] = []
-        for line in text.splitlines():
-            cleaned = self._clean_summary(line)
-            if self._is_displayable(cleaned):
-                summaries.append(cleaned)
-        return summaries
-
     def _is_displayable(self, summary: str) -> bool:
         cleaned = self._clean_summary(summary)
         if not cleaned or cleaned in LOW_VALUE_PATTERNS:
@@ -402,18 +391,31 @@ class MemoryDisplayAdapter:
         return list(dict.fromkeys(labels))[:3]
 
     def _overview(self, memory: UserMemory, items: list[MemoryDisplayItem]) -> tuple[str | None, str | None]:
+        custom = self._custom_overview(memory)
+        if custom is not None:
+            return custom
+        if items:
+            return "旅行记忆概述", self._overview_from_items(items)
+        return "旅行记忆概述", "星球还在根据你的旅行记录学习你的长期偏好。"
+
+    def _custom_overview(self, memory: UserMemory) -> tuple[str, str] | None:
         mem_json = memory.memory_json or {}
         overview = mem_json.get("display_overview")
         if not isinstance(overview, dict):
-            text = (memory.memory_text or "").strip()
-            if self._is_custom_overview_text(text):
-                return "旅行记忆概述", text
-            if items:
-                return "旅行记忆概述", self._overview_from_items(items)
-            return "旅行记忆概述", "星球还在根据你的旅行记录学习你的长期偏好。"
-        title = str(overview.get("title") or "").strip() or None
-        content = str(overview.get("content") or "").strip() or None
+            return None
+        title = str(overview.get("title") or "").strip() or "旅行记忆概述"
+        content = str(overview.get("content") or "").strip()
+        if not content:
+            return None
         return title, content
+
+    def _has_custom_overview(self, memory: UserMemory) -> bool:
+        return self._custom_overview(memory) is not None
+
+    def _has_planning_preference_values(
+        self, fields: list[MemoryPlanningPreferenceField]
+    ) -> bool:
+        return any(field.value.strip() for field in fields)
 
     def _format_datetime(self, value: datetime | None) -> str | None:
         if value is None:
@@ -449,7 +451,3 @@ class MemoryDisplayAdapter:
         if len(lines) == 1:
             lines.append("- 当前重点：更适合围绕氛围、节奏和停留质量来筛选路线，而不是单纯堆景点。")
         return "\n".join(lines)
-
-    def _is_custom_overview_text(self, text: str | None) -> bool:
-        value = (text or "").strip()
-        return bool(value) and not value.startswith("稳定旅行偏好：") and not value.startswith("暂无稳定偏好")

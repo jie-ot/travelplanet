@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { Check, Compass, ImageIcon, Loader2, Mail, MapPin, Route, Sparkles, Trash2, X } from "lucide-react"
+import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import {
   deleteTravelMemoryDescription,
   getTravelMemory,
@@ -437,7 +438,9 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
   const [savingPlanning, setSavingPlanning] = useState(false)
   const [savingId, setSavingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<TravelMemoryDescription | null>(null)
   const visitedPlaces = buildVisitedPlaces({ draftItineraryData, plans, postcardGroups, reports })
+  const deleting = !!pendingDelete && deletingId === pendingDelete.id
 
   useEffect(() => registerBackHandler(onClose), [onClose, registerBackHandler])
 
@@ -460,11 +463,14 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose()
+      if (event.key === "Escape") {
+        if (pendingDelete) return
+        onClose()
+      }
     }
     document.addEventListener("keydown", onKeyDown)
     return () => document.removeEventListener("keydown", onKeyDown)
-  }, [onClose])
+  }, [onClose, pendingDelete])
 
   async function handleSaveOverview(content: string) {
     const nextContent = content.trim()
@@ -523,18 +529,11 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
   }
 
   async function handleDelete(id: string) {
-    setMemory((current) =>
-      current
-        ? {
-            ...current,
-            memories: current.memories.filter((item) => item.id !== id),
-          }
-        : current,
-    )
     setDeletingId(id)
     try {
       const next = await deleteTravelMemoryDescription(id)
       setMemory(next)
+      setPendingDelete(null)
       toast("已删除这条长期记忆", "success")
     } catch (err) {
       toastError(err)
@@ -546,7 +545,10 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-end bg-foreground/34 backdrop-blur-md animate-in fade-in"
-      onClick={onClose}
+      onClick={() => {
+        if (pendingDelete) return
+        onClose()
+      }}
     >
       <section
         role="dialog"
@@ -597,7 +599,7 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
           {!loading && memory && (
             <div className="space-y-7">
               <MemoryOverview
-                key={`overview-${memory.version}-${overviewText(memory)}`}
+                key={`overview-${memory.overviewContent ?? ""}`}
                 memory={memory}
                 visitedPlaces={visitedPlaces}
                 saving={savingOverview}
@@ -628,7 +630,10 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
                         saving={savingId === item.id}
                         deleting={deletingId === item.id}
                         onSave={(id, title, content) => void handleSave(id, title, content)}
-                        onDelete={(id) => void handleDelete(id)}
+                        onDelete={(id) => {
+                          const target = memory.memories.find((item) => item.id === id)
+                          if (target) setPendingDelete(target)
+                        }}
                       />
                     ))}
                   </div>
@@ -642,6 +647,34 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </section>
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title="删除这条长期记忆？"
+        description={pendingDelete ? `“${pendingDelete.title}”将被移除，删除后无法恢复。` : ""}
+        onClose={() => {
+          if (deleting) return
+          setPendingDelete(null)
+        }}
+        actions={[
+          {
+            label: deleting ? "删除中…" : "删除",
+            variant: "danger",
+            onClick: () => {
+              if (!pendingDelete || deleting) return
+              void handleDelete(pendingDelete.id)
+            },
+          },
+          {
+            label: "取消",
+            variant: "ghost",
+            onClick: () => {
+              if (deleting) return
+              setPendingDelete(null)
+            },
+          },
+        ]}
+      />
     </div>
   )
 }

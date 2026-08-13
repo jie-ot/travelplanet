@@ -1,4 +1,4 @@
-"""Build cached AMap static play maps from DeepSeek schedule annotations."""
+"""Build cached AMap static play maps by projecting itinerary structure."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from app.ai.model_selection import PlanningModel, supports_daily_map_planning
 from app.ai.tools import amap_provider
@@ -23,6 +23,7 @@ from app.models.itinerary import (
     Schedule,
 )
 from app.services import storage_service
+from app.services.schedule_kind import classify_schedule, fact_for_schedule
 
 _MARKERS = "ABCDEFGHIJ"
 _MAX_MAPS_PER_DAY = 3
@@ -36,6 +37,7 @@ _TRANSPORT_LABELS = {
     "bicycling": "骑行",
 }
 _TRANSPORT_TEXT_PATTERN = re.compile(r"(步行|地铁|公交|打车|出租车|网约车|骑行)")
+_CITY_SPLIT = re.compile(r"[、,，/—–→>-]")
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,12 @@ class _Candidate:
     kind: Literal["hotel", "attraction"]
 
 
-def enrich_daily_maps(data: ItineraryData, planning_model: PlanningModel) -> ItineraryData:
+def enrich_daily_maps(
+    data: ItineraryData,
+    planning_model: PlanningModel,
+    *,
+    facts: dict[str, dict[str, Any]] | None = None,
+) -> ItineraryData:
     """Populate optional daily maps without making itinerary generation fail."""
     for day in data.itinerary:
         day.daily_maps = []
@@ -55,8 +62,16 @@ def enrich_daily_maps(data: ItineraryData, planning_model: PlanningModel) -> Iti
         return data
 
     pending: list[tuple[DailyItinerary, DailyMap, dict[str, str | int]]] = []
+    overnight_hotel: _Candidate | None = None
+    overnight_city = _trip_city(data.trip_info.destination)
     for day in data.itinerary:
-        groups = _candidate_groups(day)
+        groups, overnight_hotel, overnight_city = _candidate_groups(
+            day,
+            data,
+            facts=facts,
+            overnight_hotel=overnight_hotel,
+            overnight_city=overnight_city,
+        )
         for group_index, (group_name, candidates) in enumerate(groups.items()):
             daily_map, params = _build_map(day, group_name, group_index, candidates)
             day.daily_maps.append(daily_map)
@@ -81,50 +96,110 @@ def enrich_daily_maps(data: ItineraryData, planning_model: PlanningModel) -> Iti
     return data
 
 
-def _candidate_groups(day: DailyItinerary) -> OrderedDict[str, list[_Candidate]]:
-    groups: OrderedDict[str, list[_Candidate]] = OrderedDict()
-    has_model_annotations = any(
-        schedule.map_role or schedule.map_group or schedule.map_label
-        for schedule in day.schedules
-    )
+def _candidate_groups(
+    day: DailyItinerary,
+    data: ItineraryData,
+    *,
+    facts: dict[str, dict[str, Any]] | None,
+    overnight_hotel: _Candidate | None,
+    overnight_city: str,
+) -> tuple[OrderedDict[str, list[_Candidate]], _Candidate | None, str]:
+    hotels_today: list[_Candidate] = []
+    attractions: list[_Candidate] = []
+    checkin: _Candidate | None = None
+    checkout: _Candidate | None = None
     for schedule in day.schedules:
-        candidate = _candidate(
-            schedule,
-            fallback_group=None if has_model_annotations else _fallback_group(day),
-        )
+        fact = fact_for_schedule(schedule, facts)
+        kind = classify_schedule(schedule, fact)
+        city = _point_city(schedule, fact, overnight_city, data.trip_info.destination)
+        candidate = _map_candidate(schedule, kind=kind, city=city)
         if candidate is None:
             continue
+        if candidate.kind == "hotel":
+            hotels_today.append(candidate)
+            searchable = " ".join(
+                part for part in (schedule.place_name, schedule.activity) if part
+            )
+            if "入住" in searchable:
+                checkin = candidate
+            elif "退房" in searchable:
+                checkout = candidate
+            elif checkin is None:
+                checkin = candidate
+        elif candidate.kind == "attraction":
+            attractions.append(candidate)
+
+    if not attractions:
+        next_hotel = checkin or (None if checkout else overnight_hotel)
+        next_city = next_hotel.group if next_hotel else overnight_city
+        return OrderedDict(), next_hotel, next_city
+
+    points: list[_Candidate] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(candidate: _Candidate | None) -> None:
+        if candidate is None:
+            return
+        key = (candidate.location, candidate.name)
+        if key in seen:
+            return
+        seen.add(key)
+        points.append(candidate)
+
+    carried = overnight_hotel
+    if checkout and carried and carried.location == checkout.location:
+        carried = None
+    add(carried)
+    for hotel in hotels_today:
+        add(hotel)
+    for attraction in attractions:
+        add(attraction)
+
+    groups: OrderedDict[str, list[_Candidate]] = OrderedDict()
+    for candidate in points:
         groups.setdefault(candidate.group, []).append(candidate)
 
     valid: OrderedDict[str, list[_Candidate]] = OrderedDict()
     for group, candidates in groups.items():
-        deduped: list[_Candidate] = []
-        seen: set[tuple[str, str]] = set()
-        for candidate in candidates:
-            key = (candidate.location, candidate.name)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(candidate)
-        if len(deduped) >= 2:
-            valid[group] = deduped[:_MAX_POINTS_PER_MAP]
+        if len(candidates) >= 2:
+            valid[group] = candidates[:_MAX_POINTS_PER_MAP]
         if len(valid) >= _MAX_MAPS_PER_DAY:
             break
-    return valid
+
+    next_hotel = checkin or (None if checkout else overnight_hotel)
+    next_city = next_hotel.group if next_hotel else overnight_city
+    return valid, next_hotel, next_city
 
 
-def _candidate(schedule: Schedule, *, fallback_group: str | None = None) -> _Candidate | None:
-    role = schedule.map_role
-    group_hint = schedule.map_group
-    label_hint = schedule.map_label
-    if fallback_group and not (role or group_hint or label_hint):
-        inferred = _fallback_semantics(schedule, fallback_group)
-        if inferred:
-            role, group_hint, label_hint = inferred
+def _map_candidate(
+    schedule: Schedule,
+    *,
+    kind: str,
+    city: str,
+) -> _Candidate | None:
+    if kind not in {"hotel", "attraction"}:
+        return None
+    location = _trusted_coord(schedule)
+    if location is None:
+        return None
+    name = " ".join(
+        (schedule.map_label or schedule.place_name or schedule.activity).split()
+    )[:32]
+    group = " ".join(city.split())[:24]
+    if not name or not group:
+        return None
+    return _Candidate(
+        schedule=schedule,
+        location=location,
+        group=group,
+        name=name,
+        kind=kind,
+    )
+
+
+def _trusted_coord(schedule: Schedule) -> str | None:
     if (
-        role not in {"hotel", "attraction"}
-        or not group_hint
-        or not schedule.location
+        not schedule.location
         or schedule.fact_status != "verified"
         or not schedule.fact_refs
         or not amap_provider.looks_like_coord(schedule.location)
@@ -138,60 +213,46 @@ def _candidate(schedule: Schedule, *, fallback_group: str | None = None) -> _Can
         return None
     if not (73 <= lng <= 136 and 3 <= lat <= 54):
         return None
-    group = " ".join(group_hint.split())[:24]
-    name = " ".join(
-        (label_hint or schedule.place_name or schedule.activity).split()
-    )[:32]
-    if not group or not name:
-        return None
-    return _Candidate(
-        schedule=schedule,
-        location=location,
-        group=group,
-        name=name,
-        kind=role,
-    )
+    return location
 
 
-def _fallback_group(day: DailyItinerary) -> str:
-    """Provide a conservative group only when DeepSeek omitted every map hint."""
-    prefix = (day.title or "").split("：", 1)[0].strip()
-    prefix = re.split(r"[—→>-]", prefix)[-1].strip()
-    return (prefix or "当日游玩")[:24]
-
-
-def _fallback_semantics(
-    schedule: Schedule, group: str
-) -> tuple[str, str, str] | None:
-    """Recover reliable maps from verified schedule tags without another model call."""
-    tags = {tag.strip() for tag in schedule.tags if tag.strip()}
-    searchable = " ".join(
+def _point_city(
+    schedule: Schedule,
+    fact: dict[str, Any] | None,
+    overnight_city: str,
+    destination: str,
+) -> str:
+    if fact:
+        for key in ("city_name", "city"):
+            value = str(fact.get(key) or "").strip()
+            if value:
+                return re.sub(r"(市)$", "", value)[:24]
+    text = " ".join(
         part for part in (schedule.place_name, schedule.activity) if part
     )
-    name = (schedule.place_name or schedule.activity).strip()
-    if "住宿" in tags and re.search(r"(酒店|客栈|民宿|旅馆|入住|退房)", searchable):
-        return "hotel", group, name
-    if tags & {"大交通", "换乘", "美食", "餐饮", "购物"}:
-        return None
-    attraction_markers = (
-        "历史",
-        "文化",
-        "景区",
-        "风景",
-        "自然",
-        "滨海",
-        "博物馆",
-        "公园",
-        "广场",
-        "建筑",
-        "红色",
-        "演出",
-        "古镇",
-        "街区",
-    )
-    if any(marker in tag for tag in tags for marker in attraction_markers):
-        return "attraction", group, name
-    return None
+    for city in _trip_cities(destination):
+        if city and city in text:
+            return city[:24]
+    hinted = amap_provider.infer_city_hint(schedule.place_name, schedule.activity)
+    if hinted:
+        return hinted[:24]
+    if overnight_city:
+        return overnight_city[:24]
+    return _trip_city(destination)
+
+
+def _trip_cities(destination: str) -> list[str]:
+    parts = [
+        re.sub(r"(市)$", "", part.strip())
+        for part in _CITY_SPLIT.split(destination or "")
+        if part.strip()
+    ]
+    return [part for part in parts if part]
+
+
+def _trip_city(destination: str) -> str:
+    cities = _trip_cities(destination)
+    return (cities[0] if cities else "当日游玩")[:24]
 
 
 def _build_map(
