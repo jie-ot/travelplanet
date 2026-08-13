@@ -21,7 +21,7 @@ function toPlainPreview(md: string): string {
 }
 
 export function HistoryView() {
-  const { plans, navigate, goBack, deletePlan, deletingId, beginEditPlan } = useApp()
+  const { plans, initLoading, navigate, goBack, deletePlan, deletingId, beginEditPlan } = useApp()
   const [pendingDelete, setPendingDelete] = useState<Plan | null>(null)
   const deleting = !!pendingDelete && deletingId === pendingDelete.id
 
@@ -30,7 +30,7 @@ export function HistoryView() {
       <TopBar title="历史规划" />
 
       <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar px-4 py-4 min-[400px]:px-5 min-[400px]:py-5">
-        {plans.length === 0 ? (
+        {initLoading ? null : plans.length === 0 ? (
           <EmptyState
             icon={<Compass className="size-7" aria-hidden />}
             title="还没有保存的规划"

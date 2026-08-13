@@ -1,8 +1,7 @@
 "use client"
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
-import { App as CapacitorApp } from "@capacitor/app"
-import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
+import type { PluginListenerHandle } from "@capacitor/core"
 import { usePathname, useRouter } from "next/navigation"
 import type {
   BusinessCode,
@@ -235,6 +234,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     reports: false,
     plans: false,
   })
+  // Bumps when a plan is saved locally so an in-flight loadAll cannot
+  // overwrite the just-saved list with the older server snapshot.
+  const plansWriteEpochRef = useRef(0)
 
   useEffect(() => {
     const handlePopState = () => {
@@ -274,29 +276,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [goBack, pathname])
 
   useEffect(() => {
-    if (Capacitor.getPlatform() !== "android" || !Capacitor.isPluginAvailable("App")) return
-
+    // Capacitor patches document.documentElement on import. Keep it inside
+    // useEffect so the SSR markup can hydrate before any platform classes land.
     let cancelled = false
     let listener: PluginListenerHandle | null = null
 
-    void CapacitorApp.addListener("backButton", () => {
-      const handler = backHandlers.current[backHandlers.current.length - 1]
-      if (handler) {
-        handler()
-        return
-      }
-      if (pathnameRef.current === "/") {
-        void CapacitorApp.exitApp()
-        return
-      }
-      goBackRef.current()
-    }).then((handle) => {
+    void (async () => {
+      const { Capacitor } = await import("@capacitor/core")
+      const { App: CapacitorApp } = await import("@capacitor/app")
+      if (Capacitor.getPlatform() !== "android" || !Capacitor.isPluginAvailable("App")) return
+
+      const handle = await CapacitorApp.addListener("backButton", () => {
+        const handler = backHandlers.current[backHandlers.current.length - 1]
+        if (handler) {
+          handler()
+          return
+        }
+        if (pathnameRef.current === "/") {
+          void CapacitorApp.exitApp()
+          return
+        }
+        goBackRef.current()
+      })
       if (cancelled) {
         void handle.remove()
         return
       }
       listener = handle
-    })
+    })()
 
     return () => {
       cancelled = true
@@ -335,6 +342,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   /* ---------------- 初始化全量加载（规范 2.1 / §8） ---------------- */
   const loadAll = useCallback(async () => {
     setInitLoading(true)
+    const plansEpoch = plansWriteEpochRef.current
     const [pgRes, rptRes, planRes] = await Promise.allSettled([getPostcardGroups(), getReports(), getPlans()])
 
     const nextError: LoadErrorState = { postcardGroups: false, reports: false, plans: false }
@@ -352,7 +360,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (planRes.status === "fulfilled") {
-      setPlans(planRes.value)
+      if (plansWriteEpochRef.current === plansEpoch) {
+        setPlans(planRes.value)
+      }
     } else {
       nextError.plans = true
     }
@@ -583,9 +593,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       let plan: Plan
       if (editingPlanId) {
         plan = await updatePlan(editingPlanId, { itineraryData: draftItineraryData })
+        plansWriteEpochRef.current += 1
         setPlans((p) => p.map((x) => (x.id === plan.id ? plan : x)))
       } else {
         plan = await createPlan({ itineraryData: draftItineraryData })
+        plansWriteEpochRef.current += 1
         setPlans((p) => [plan, ...p])
       }
       // 用后端加工后的实体回写草稿，后续编辑视为针对该已保存规划
