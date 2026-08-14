@@ -1201,6 +1201,11 @@
   gap: .35rem;
   padding: .55rem .85rem;
   color: white;
+  border-radius: 999px;
+  background: #07899b;
+  box-shadow: 0 10px 22px -16px rgb(7 91 112 / .9);
+  font-size: .75rem;
+  font-weight: 750;
 }
 
 .itinerary-export-bar button:disabled {
