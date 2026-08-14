@@ -26,4 +26,4 @@ def generate(
         generate_report=payload.options.generate_report,
     ):
         result = generation_service.generate(current_user_id, payload)
-    return success(result.model_dump())
+    return success(result.model_dump(by_alias=True))

@@ -1165,6 +1165,49 @@
   font-size: .84375rem;
 }
 
+.itinerary-export-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .8rem;
+  padding: .72rem .9rem;
+  border-bottom: 1px solid rgb(10 56 80 / .08);
+  background: rgb(255 253 248 / .94);
+}
+
+.itinerary-export-bar > div {
+  display: grid;
+  min-width: 0;
+  gap: .08rem;
+}
+
+.itinerary-export-bar strong {
+  color: #0b4258;
+  font-family: var(--font-rounded-family);
+  font-size: .875rem;
+}
+
+.itinerary-export-bar span {
+  color: #6d8188;
+  font-size: .6875rem;
+}
+
+.itinerary-export-bar button {
+  display: inline-flex;
+  min-height: 2.6rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: .35rem;
+  padding: .55rem .85rem;
+  color: white;
+}
+
+.itinerary-export-bar button:disabled {
+  cursor: wait;
+  opacity: .62;
+}
+
 .itinerary-front-guides {
   gap: .45rem;
   padding: .6rem .85rem .55rem;

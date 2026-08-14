@@ -19,7 +19,7 @@ def list_reports(
     session: Session = Depends(get_session),
 ) -> dict:
     reports = report_service.list_reports(session, current_user_id)
-    return success([r.model_dump() for r in reports])
+    return success([r.model_dump(by_alias=True) for r in reports])
 
 
 @router.delete("/reports/{report_id}")

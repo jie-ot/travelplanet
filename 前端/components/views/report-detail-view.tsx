@@ -21,6 +21,8 @@ import { saveTravelImage } from "@/lib/postcard-save"
 import type { Report, ReportChartPoint, TravelProfileData, VisualTheme } from "@/types"
 
 type ThemeStyle = CSSProperties & Record<`--${string}`, string | number>
+type UnknownRecord = Record<string, unknown>
+type ReportAliasPayload = Report & { profile_data?: unknown }
 
 const LEGACY_THEME_BY_DIMENSION: Record<ReportChartPoint["dimension"], VisualTheme> = {
   自然探索: "forest_light",
@@ -85,7 +87,7 @@ export function ReportDetailView() {
   }
 
   const currentReport = report
-  const profile = currentReport.profileData
+  const profile = getReportProfile(currentReport)
   const theme = profileTheme(profile, currentReport)
   const colors = THEME_COLORS[theme]
   const spectrumValue = (id: TravelProfileData["spectrums"][number]["id"]) =>
@@ -204,9 +206,9 @@ export function ReportDetailView() {
             <>
               <ProfileOverview report={currentReport} profile={profile} />
               <ProfileMoments content={currentReport.content} profile={profile} />
-              <ProfileGuidance profile={profile} />
+              <ProfileGuidance content={currentReport.content} profile={profile} />
               <section className="persona-section persona-spectrum-section persona-reveal">
-                <SectionHeading index="06" title="旅行光谱" icon={<Compass className="size-4" aria-hidden />} />
+                <SectionHeading index="07" title="旅行光谱" icon={<Compass className="size-4" aria-hidden />} />
                 <div className="persona-spectrum-grid">
                   {profile.spectrums.map((spectrum) => (
                     <article
@@ -310,27 +312,76 @@ function ProfileMoments({
   )
 }
 
-function ProfileGuidance({ profile }: { profile: TravelProfileData }) {
+function ProfileGuidance({
+  content,
+  profile,
+}: {
+  content: string
+  profile: TravelProfileData
+}) {
+  const narrative = parseProfileNarrative(content, profile)
   const music = profile.musicRecommendation ?? fallbackMusic(profile)
   const prescription =
     profile.travelPrescription ||
     profile.nextTripInspiration ||
     "下一次，选择一个能慢慢停留的片区，把时间留给真正吸引你的细节。"
+  const strengths = nonEmptyList(profile.strengths, [profile.slogan]).slice(0, 3)
+  const watchouts = nonEmptyList(profile.watchouts, ["别把行程排得太满，给临时心动留一点空间。"]).slice(0, 3)
+  const actionTips = buildExportActionTips(profile, narrative, prescription)
+  const scenarios = nonEmptyList(profile.bestScenarios, profile.keywords).slice(0, 5)
+
   return (
     <section className="persona-section persona-guidance-section persona-reveal">
+      <SectionHeading index="04" title="旅行指引" icon={<Navigation className="size-4" aria-hidden />} />
+      <div className="persona-insight-grid">
+        <InsightCard title="你的优势" items={strengths} tone="positive" />
+        <InsightCard title="出行提醒" items={watchouts} tone="neutral" />
+      </div>
+      <div className="persona-insight-grid persona-insight-grid-secondary">
+        <article className="persona-insight-card is-accent">
+          <h3>适合场景</h3>
+          <div className="persona-scenario-tags">
+            {scenarios.map((item) => (
+              <span key={item}>{item}</span>
+            ))}
+          </div>
+        </article>
+        <InsightCard title="行动建议" items={actionTips} tone="accent" />
+      </div>
       <div className="persona-guidance-grid">
         <article className="persona-extra-card persona-music-card">
-          <SectionHeading index="04" title="人格声轨" icon={<Music2 className="size-4" aria-hidden />} />
+          <SectionHeading index="05" title="人格声轨" icon={<Music2 className="size-4" aria-hidden />} />
           <p className="persona-music-title">{music.title}</p>
           <p className="persona-music-mood">{music.mood}</p>
           <p className="persona-extra-copy">{music.reason}</p>
         </article>
         <article className="persona-extra-card">
-          <SectionHeading index="05" title="下一站处方" icon={<Navigation className="size-4" aria-hidden />} />
+          <SectionHeading index="06" title="下一站处方" icon={<Navigation className="size-4" aria-hidden />} />
           <p className="persona-prescription">{prescription}</p>
         </article>
       </div>
     </section>
+  )
+}
+
+function InsightCard({
+  title,
+  items,
+  tone,
+}: {
+  title: string
+  items: string[]
+  tone: "positive" | "neutral" | "accent"
+}) {
+  return (
+    <article className={`persona-insight-card is-${tone}`}>
+      <h3>{title}</h3>
+      <ul className="persona-insight-list">
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </article>
   )
 }
 
@@ -412,6 +463,7 @@ type ReportSnapshot = {
   profileCode?: string
   summary: string
   keywords: string[]
+  moments: string[]
   strengths: string[]
   actionTips: string[]
   music?: string
@@ -420,14 +472,17 @@ type ReportSnapshot = {
 }
 
 async function renderReportCanvas(report: Report) {
-  const profile = report.profileData
+  const profile = getReportProfile(report)
   const theme = profileTheme(profile, report)
-  const snapshot = buildReportSnapshot(report, theme)
+  const snapshot = buildReportSnapshot(report, theme, profile)
   return renderSnapshotCanvas(snapshot)
 }
 
-function buildReportSnapshot(report: Report, theme: VisualTheme): ReportSnapshot {
-  const profile = report.profileData
+function buildReportSnapshot(
+  report: Report,
+  theme: VisualTheme,
+  profile = getReportProfile(report),
+): ReportSnapshot {
   if (!profile) {
     return {
       title: report.personalitySummary,
@@ -436,6 +491,7 @@ function buildReportSnapshot(report: Report, theme: VisualTheme): ReportSnapshot
       dateLabel: report.dateLabel,
       summary: summarizeText(report.content, 78),
       keywords: [],
+      moments: [],
       strengths: ["偏好会自然流露在旅途选择里。"],
       actionTips: ["下一次出发前，先留一段给真正想停下来的片刻。"],
       theme,
@@ -452,6 +508,7 @@ function buildReportSnapshot(report: Report, theme: VisualTheme): ReportSnapshot
     profileCode: profile.personaCode,
     summary: profile.summary || summarizeText(narrative.intro || profile.slogan, 90),
     keywords: profile.keywords.slice(0, 4),
+    moments: narrative.moments.map((moment) => `${moment.title}：${moment.content}`).slice(0, 2),
     strengths: nonEmptyList(profile.strengths, [profile.slogan]).slice(0, 3),
     actionTips: buildExportActionTips(profile, narrative, prescription),
     music: music.title,
@@ -605,8 +662,8 @@ function drawPosterInsightColumns(
     y: 798,
     width: (width - 184) / 2,
     height: 252,
-    title: "你的优势",
-    items: snapshot.strengths,
+    title: snapshot.moments.length ? "旅行瞬间" : "你的优势",
+    items: snapshot.moments.length ? snapshot.moments : snapshot.strengths,
     colors,
   })
   drawPosterListCard(context, {
@@ -860,6 +917,130 @@ function looksLikePrescription(text: string, prescription?: string | null) {
   if (!normalized) return true
   if (banned && normalized === banned) return true
   return /^(下一次|下次|下一站|建议|去|选择|把时间|留给|先把|留意)/.test(normalized)
+}
+
+function getReportProfile(report: Report): TravelProfileData | null {
+  return normalizeTravelProfile(report.profileData ?? (report as ReportAliasPayload).profile_data)
+}
+
+function normalizeTravelProfile(value: unknown): TravelProfileData | null {
+  if (!isRecord(value)) return null
+  const source = camelizeKeys(value) as Partial<TravelProfileData>
+  const visualTheme = isVisualTheme(source.visualTheme) ? source.visualTheme : "forest_light"
+  const spectrums = Array.isArray(source.spectrums)
+    ? source.spectrums.map(normalizeSpectrum).filter((item): item is TravelProfileData["spectrums"][number] => Boolean(item))
+    : []
+  const modules = Array.isArray(source.modules)
+    ? source.modules.map(normalizeModule).filter((item): item is TravelProfileData["modules"][number] => Boolean(item))
+    : []
+  const archetypeName = textValue(source.archetypeName)
+  const slogan = textValue(source.slogan)
+  const nextTripInspiration = textValue(source.nextTripInspiration)
+
+  if (!archetypeName || !slogan || !nextTripInspiration || !spectrums.length || !modules.length) {
+    return null
+  }
+
+  return {
+    archetypeId: textValue(source.archetypeId) || "custom",
+    archetypeName,
+    personaCode: textValue(source.personaCode) || "TRAVEL-PERSONA",
+    slogan,
+    summary: nullableText(source.summary),
+    spectrums,
+    keywords: textList(source.keywords),
+    modules,
+    strengths: textList(source.strengths),
+    watchouts: textList(source.watchouts),
+    bestScenarios: textList(source.bestScenarios),
+    actionTips: textList(source.actionTips),
+    nextTripInspiration,
+    musicRecommendation: normalizeMusic(source.musicRecommendation),
+    travelPrescription: nullableText(source.travelPrescription),
+    souvenirLine: nullableText(source.souvenirLine),
+    visualTheme,
+  }
+}
+
+function normalizeSpectrum(value: unknown): TravelProfileData["spectrums"][number] | null {
+  if (!isRecord(value)) return null
+  const source = camelizeKeys(value) as Partial<TravelProfileData["spectrums"][number]>
+  if (!source.id || !["environment", "depth", "planning", "social"].includes(source.id)) return null
+  const leftLabel = textValue(source.leftLabel)
+  const rightLabel = textValue(source.rightLabel)
+  if (!leftLabel || !rightLabel) return null
+  return {
+    id: source.id,
+    leftLabel,
+    rightLabel,
+    value: clampScore(Number(source.value)),
+  }
+}
+
+function normalizeModule(value: unknown): TravelProfileData["modules"][number] | null {
+  if (!isRecord(value)) return null
+  const source = camelizeKeys(value) as Partial<TravelProfileData["modules"][number]>
+  const title = textValue(source.title)
+  const content = textValue(source.content)
+  if (!title || !content) return null
+  return { title, content }
+}
+
+function normalizeMusic(value: unknown): TravelProfileData["musicRecommendation"] {
+  if (!isRecord(value)) return null
+  const source = camelizeKeys(value) as Partial<NonNullable<TravelProfileData["musicRecommendation"]>>
+  const title = textValue(source.title)
+  const reason = textValue(source.reason)
+  const mood = textValue(source.mood)
+  if (!title || !reason || !mood) return null
+  return { title, reason, mood }
+}
+
+function camelizeKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(camelizeKeys)
+  if (!isRecord(value)) return value
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [toCamelKey(key), camelizeKeys(child)]),
+  )
+}
+
+function toCamelKey(value: string) {
+  return value.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase())
+}
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null
+}
+
+function textValue(value: unknown) {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function nullableText(value: unknown) {
+  const text = textValue(value)
+  return text || null
+}
+
+function textList(value: unknown) {
+  return Array.isArray(value) ? value.map(textValue).filter(Boolean) : []
+}
+
+function clampScore(value: number) {
+  if (!Number.isFinite(value)) return 50
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function isVisualTheme(value: unknown): value is VisualTheme {
+  return (
+    value === "forest_light" ||
+    value === "ocean_blue" ||
+    value === "sunset_orange" ||
+    value === "museum_gold" ||
+    value === "city_neon" ||
+    value === "night_purple" ||
+    value === "snow_silver" ||
+    value === "desert_amber"
+  )
 }
 
 const HEADING_RE = /^\s*(#{1,6})\s+(.*\S)\s*$/

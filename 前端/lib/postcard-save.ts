@@ -69,6 +69,7 @@ async function downloadInBrowser(imageUrl: string, fileName: string): Promise<vo
 
 async function tryShareImage(blob: Blob, fileName: string): Promise<boolean> {
   if (typeof navigator === "undefined" || typeof navigator.share !== "function") return false
+  if (!isMobileBrowser()) return false
   try {
     const file = new File([blob], fileName, { type: blob.type || "image/png" })
     if (typeof navigator.canShare === "function" && !navigator.canShare({ files: [file] })) {
@@ -81,7 +82,9 @@ async function tryShareImage(blob: Blob, fileName: string): Promise<boolean> {
     })
     return true
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") return true
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("已取消保存")
+    }
     return false
   }
 }
@@ -115,4 +118,9 @@ function extensionForMimeType(mimeType: string): string {
 function isIosBrowser(): boolean {
   if (typeof navigator === "undefined") return false
   return /iP(ad|hone|od)/i.test(navigator.userAgent)
+}
+
+function isMobileBrowser(): boolean {
+  if (typeof navigator === "undefined") return false
+  return /Android|iP(ad|hone|od)|Mobile/i.test(navigator.userAgent)
 }
