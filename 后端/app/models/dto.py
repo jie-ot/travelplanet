@@ -92,15 +92,29 @@ class ProfileModule(CamelModel):
     content: str
 
 
+class MusicRecommendation(CamelModel):
+    title: str
+    reason: str
+    mood: str
+
+
 class TravelProfileData(CamelModel):
     archetype_id: str
     archetype_name: str
     persona_code: str
     slogan: str
+    summary: str | None = None
     spectrums: list[ProfileSpectrum]
     keywords: list[str]
     modules: list[ProfileModule]
+    strengths: list[str] = Field(default_factory=list)
+    watchouts: list[str] = Field(default_factory=list)
+    best_scenarios: list[str] = Field(default_factory=list)
+    action_tips: list[str] = Field(default_factory=list)
     next_trip_inspiration: str
+    music_recommendation: MusicRecommendation | None = None
+    travel_prescription: str | None = None
+    souvenir_line: str | None = None
     visual_theme: VisualTheme
 
 

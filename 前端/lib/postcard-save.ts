@@ -50,13 +50,40 @@ async function downloadInBrowser(imageUrl: string, fileName: string): Promise<vo
   if (!response.ok) throw new Error("图片下载失败")
 
   const blob = await response.blob()
-  const objectUrl = URL.createObjectURL(blob)
   const extension = extensionForMimeType(blob.type)
+  const shared = await tryShareImage(blob, `${fileName}.${extension}`)
+  if (shared) return
+
+  const objectUrl = URL.createObjectURL(blob)
   const anchor = document.createElement("a")
   anchor.href = objectUrl
   anchor.download = `${fileName}.${extension}`
   anchor.click()
+  if (isIosBrowser()) {
+    window.setTimeout(() => {
+      window.open(objectUrl, "_blank", "noopener,noreferrer")
+    }, 120)
+  }
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1_000)
+}
+
+async function tryShareImage(blob: Blob, fileName: string): Promise<boolean> {
+  if (typeof navigator === "undefined" || typeof navigator.share !== "function") return false
+  try {
+    const file = new File([blob], fileName, { type: blob.type || "image/png" })
+    if (typeof navigator.canShare === "function" && !navigator.canShare({ files: [file] })) {
+      return false
+    }
+    await navigator.share({
+      files: [file],
+      title: fileName,
+      text: "旅行星球导出的图片",
+    })
+    return true
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return true
+    return false
+  }
 }
 
 async function blobUrlToDataUrl(blobUrl: string): Promise<string> {
@@ -83,4 +110,9 @@ function extensionForMimeType(mimeType: string): string {
   if (mimeType.includes("gif")) return "gif"
   if (mimeType.includes("heic") || mimeType.includes("heif")) return "heic"
   return "jpg"
+}
+
+function isIosBrowser(): boolean {
+  if (typeof navigator === "undefined") return false
+  return /iP(ad|hone|od)/i.test(navigator.userAgent)
 }

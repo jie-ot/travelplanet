@@ -7,19 +7,17 @@
 /* Personality report — restrained illustrated travel journal */
 .persona-report {
   background:
-    radial-gradient(circle at 88% 4%, color-mix(in srgb, var(--profile-glow) 48%, transparent), transparent 14rem),
-    radial-gradient(circle at 2% 55%, color-mix(in srgb, var(--profile-accent-2) 20%, transparent), transparent 18rem),
-    linear-gradient(155deg, color-mix(in srgb, var(--profile-bg) 72%, white), var(--profile-paper) 48%, color-mix(in srgb, var(--profile-bg) 48%, white));
+    linear-gradient(180deg, color-mix(in srgb, var(--profile-paper) 90%, white), color-mix(in srgb, var(--profile-bg) 68%, white) 56%, color-mix(in srgb, var(--profile-paper-alt) 82%, white));
 }
 
 .persona-report::before {
-  opacity: .1;
+  opacity: .04;
 }
 
 .persona-report::after {
-  inset: .32rem;
-  border-color: color-mix(in srgb, var(--profile-line) 42%, transparent);
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / .42);
+  inset: .5rem;
+  border-color: color-mix(in srgb, var(--profile-line) 24%, transparent);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / .56);
 }
 
 .persona-back-button {
@@ -298,109 +296,123 @@
 }
 
 .persona-spectrum-section {
-  gap: .5rem;
+  gap: .68rem;
 }
 
-.persona-spectrums {
-  gap: .58rem .9rem;
-}
-
-.persona-spectrum {
-  gap: .3rem;
-}
-
-.persona-spectrum-labels {
-  grid-template-columns: 1fr auto 1fr;
+.persona-spectrum-intro {
   color: var(--profile-muted);
-  font-size: .82rem;
-  font-weight: 650;
-  line-height: 1.2;
+  font-size: .86rem;
+  line-height: 1.6;
+  margin-left: .08rem;
 }
 
-.persona-spectrum-labels strong {
-  min-width: 1.8rem;
-  padding: .08rem .32rem;
+.persona-spectrum-grid {
+  display: grid;
+  gap: .75rem;
+}
+
+.persona-spectrum-card {
+  padding: .92rem .92rem .86rem;
+  border: 1px solid color-mix(in srgb, var(--profile-line) 24%, transparent);
+  border-radius: 1rem;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .76), transparent 44%),
+    color-mix(in srgb, var(--profile-paper) 95%, white);
+  box-shadow: inset 0 1px rgb(255 255 255 / .84);
+}
+
+.persona-spectrum-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: .55rem;
+}
+
+.persona-spectrum-card-head strong {
+  overflow: hidden;
   color: var(--profile-ink);
-  border: 1px solid color-mix(in srgb, var(--profile-line) 62%, transparent);
-  border-radius: 999px;
-  font-family: var(--font-sans);
-  font-size: .72rem;
-  font-variant-numeric: tabular-nums;
-  font-weight: 800;
-  line-height: 1.25;
-  text-align: center;
-  background: color-mix(in srgb, var(--profile-paper-alt) 66%, white);
+  font-size: .9rem;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.persona-energy-band {
+.persona-spectrum-card-head .is-right {
+  justify-self: end;
+  text-align: right;
+}
+
+.persona-spectrum-track {
   position: relative;
-  height: .95rem;
-  overflow: visible;
-  border: 0;
-  background: none;
-}
-
-.persona-energy-band::before {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  left: 0;
-  height: .28rem;
-  content: "";
-  border: 1px solid color-mix(in srgb, var(--profile-line) 54%, transparent);
+  height: .9rem;
+  margin-top: .8rem;
   border-radius: 999px;
   background:
-    linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--profile-accent-2) 18%, var(--profile-paper-alt)),
-      color-mix(in srgb, var(--profile-line) 15%, var(--profile-paper)) 50%,
-      color-mix(in srgb, var(--profile-accent) 16%, var(--profile-paper-alt))
-    );
-  box-shadow: inset 0 1px 2px color-mix(in srgb, var(--profile-ink) 8%, transparent);
+    linear-gradient(90deg,
+      color-mix(in srgb, var(--profile-accent-2) 16%, white),
+      color-mix(in srgb, var(--profile-paper) 86%, white) 40%,
+      color-mix(in srgb, var(--profile-accent) 16%, white));
+  box-shadow:
+    inset 0 1px 2px color-mix(in srgb, var(--profile-ink) 7%, transparent),
+    0 8px 18px -16px color-mix(in srgb, var(--profile-ink) 40%, transparent);
+}
+
+.persona-spectrum-track::before,
+.persona-spectrum-track::after {
+  position: absolute;
+  top: 50%;
+  width: 1px;
+  height: .48rem;
+  content: "";
+  background: color-mix(in srgb, var(--profile-line) 56%, transparent);
   transform: translateY(-50%);
 }
 
-.persona-energy-band::after {
+.persona-spectrum-track::before {
+  left: 24%;
+}
+
+.persona-spectrum-track::after {
+  left: 74%;
+}
+
+.persona-spectrum-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--spectrum-value) * 1%);
+  border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--profile-accent) 60%, white), color-mix(in srgb, var(--profile-accent-2) 46%, white));
+}
+
+.persona-spectrum-knob {
   position: absolute;
   top: 50%;
-  left: 50%;
-  width: 1px;
-  height: .7rem;
-  content: "";
-  background: color-mix(in srgb, var(--profile-line) 68%, transparent);
+  left: clamp(.45rem, calc(var(--spectrum-value) * 1%), calc(100% - .45rem));
+  width: .88rem;
+  height: .88rem;
+  border: 2px solid var(--profile-paper);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--profile-ink) 84%, var(--profile-accent));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--profile-accent) 28%, var(--profile-line)),
+    0 4px 10px -6px color-mix(in srgb, var(--profile-ink) 28%, transparent);
   transform: translate(-50%, -50%);
 }
 
-.persona-energy-fill {
+.persona-spectrum-value {
   position: absolute;
-  z-index: 1;
-  top: 50%;
-  left: 0;
-  width: calc(var(--spectrum-value) * 1%);
-  height: .16rem;
-  opacity: .72;
+  top: -1.1rem;
+  left: clamp(1rem, calc(var(--spectrum-value) * 1%), calc(100% - 1rem));
+  min-width: 2.15rem;
+  padding: .1rem .36rem;
+  color: var(--profile-paper);
   border-radius: 999px;
-  filter: none;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--profile-accent-2) 62%, var(--profile-ink)),
-    color-mix(in srgb, var(--profile-accent) 48%, var(--profile-ink))
-  );
-  transform: translateY(-50%);
-}
-
-.persona-energy-core {
-  z-index: 2;
-  left: clamp(.4rem, calc(var(--spectrum-value) * 1%), calc(100% - .4rem));
-  width: .72rem;
-  height: .72rem;
-  border: 2px solid var(--profile-paper);
-  border-radius: .22rem;
-  background: var(--profile-ink);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--profile-accent) 34%, var(--profile-line)),
-    0 3px 7px color-mix(in srgb, var(--profile-ink) 22%, transparent);
-  transform: translate(-50%, -50%) rotate(45deg);
+  background: color-mix(in srgb, var(--profile-accent) 82%, var(--profile-ink));
+  box-shadow: 0 4px 12px -8px color-mix(in srgb, var(--profile-ink) 28%, transparent);
+  font-size: .72rem;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 
 /* Legacy reports keep their complete text and use their strongest radar axis for the theme. */
@@ -521,16 +533,47 @@
   backdrop-filter: blur(10px);
 }
 
+.persona-export-button {
+  position: absolute;
+  z-index: 8;
+  top: max(.85rem, env(safe-area-inset-top));
+  right: 1rem;
+  display: inline-flex;
+  min-height: 2.55rem;
+  align-items: center;
+  gap: .4rem;
+  padding: 0 .82rem;
+  color: var(--profile-paper);
+  border: 1px solid color-mix(in srgb, var(--profile-accent) 36%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--profile-accent) 88%, var(--profile-ink));
+  box-shadow: 0 10px 26px -18px var(--profile-ink);
+  font-size: .8125rem;
+  font-weight: 800;
+}
+
+.persona-export-button:disabled {
+  opacity: .62;
+}
+
+.persona-export-sheet {
+  width: 100%;
+  min-height: 100%;
+  color: var(--profile-ink);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--profile-paper) 94%, white), color-mix(in srgb, var(--profile-bg) 72%, white) 58%, color-mix(in srgb, var(--profile-paper-alt) 84%, white));
+}
+
 .persona-editorial-header {
   position: relative;
   flex: none;
   min-height: 11.75rem;
   padding: max(4.15rem, calc(env(safe-area-inset-top) + 3.2rem)) 1.25rem 1.2rem;
   overflow: hidden;
-  border-bottom: 1px solid color-mix(in srgb, var(--profile-line) 52%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--profile-line) 24%, transparent);
   background:
-    linear-gradient(122deg, rgb(255 255 255 / .72), transparent 58%),
-    linear-gradient(180deg, color-mix(in srgb, var(--profile-paper-alt) 64%, transparent), transparent);
+    linear-gradient(122deg, rgb(255 255 255 / .84), transparent 58%),
+    linear-gradient(180deg, color-mix(in srgb, var(--profile-paper-alt) 36%, transparent), transparent);
 }
 
 .persona-editorial-header::before,
@@ -545,8 +588,8 @@
   right: -1.2rem;
   width: 8.7rem;
   height: 7.4rem;
-  opacity: .3;
-  border: 1px dashed var(--profile-accent);
+  opacity: .14;
+  border: 1px dashed color-mix(in srgb, var(--profile-accent) 42%, transparent);
   border-radius: 48% 52% 36% 64%;
   transform: rotate(-13deg);
 }
@@ -556,8 +599,8 @@
   right: -2.2rem;
   width: 9.5rem;
   height: 2.7rem;
-  opacity: .22;
-  border-top: 1px solid var(--profile-accent-2);
+  opacity: .11;
+  border-top: 1px solid color-mix(in srgb, var(--profile-accent-2) 50%, transparent);
   border-radius: 50%;
   transform: rotate(14deg);
 }
@@ -670,6 +713,16 @@
   line-height: 1.08;
   letter-spacing: -.045em;
   text-wrap: balance;
+}
+
+.persona-editorial-subtitle {
+  max-width: 21.5rem;
+  margin: .55rem 0 0;
+  color: color-mix(in srgb, var(--profile-ink) 68%, var(--profile-muted));
+  font-family: var(--font-editorial);
+  font-size: .95rem;
+  font-weight: 650;
+  line-height: 1.62;
 }
 
 .persona-editorial-route {
@@ -891,6 +944,7 @@
 
 .persona-editorial-content.has-profile .persona-narrative,
 .persona-editorial-content.has-profile .persona-declaration,
+.persona-editorial-content.has-profile .persona-extra-grid,
 .persona-editorial-content.has-profile .persona-spectrum-section {
   width: 100%;
   box-sizing: border-box;
@@ -920,6 +974,88 @@
 
 .persona-editorial-content.has-profile .persona-spectrum-section {
   padding-top: .15rem;
+}
+
+.persona-extra-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: .78rem;
+}
+
+.persona-extra-card {
+  position: relative;
+  overflow: hidden;
+  padding: .95rem;
+  border: 1px solid color-mix(in srgb, var(--profile-line) 58%, transparent);
+  border-radius: .95rem;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .5), transparent 44%),
+    color-mix(in srgb, var(--profile-paper-alt) 46%, transparent);
+  box-shadow: inset 0 1px rgb(255 255 255 / .75);
+}
+
+.persona-extra-card::after {
+  position: absolute;
+  right: -1.6rem;
+  bottom: -1.4rem;
+  width: 5.4rem;
+  height: 5.4rem;
+  content: "";
+  pointer-events: none;
+  opacity: .16;
+  border: 1px dashed var(--profile-accent);
+  border-radius: 50%;
+}
+
+.persona-music-title {
+  margin-top: .78rem;
+  color: var(--profile-ink);
+  font-family: var(--font-rounded-family);
+  font-size: 1.05rem;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.persona-music-mood {
+  display: inline-flex;
+  margin-top: .45rem;
+  padding: .2rem .48rem;
+  color: var(--profile-paper);
+  border-radius: .28rem;
+  background: var(--profile-stamp);
+  font-size: .72rem;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.persona-extra-copy {
+  margin-top: .55rem;
+  color: var(--profile-muted);
+  font-size: .875rem;
+  font-weight: 560;
+  line-height: 1.65;
+}
+
+.persona-prescription {
+  margin-top: .78rem;
+  color: var(--profile-ink);
+  font-family: var(--font-editorial);
+  font-size: 1rem;
+  font-weight: 760;
+  line-height: 1.65;
+}
+
+@media (min-width: 720px) {
+  .persona-export-sheet {
+    max-width: 34rem;
+    min-height: auto;
+    margin: 0 auto;
+    box-shadow: 0 24px 70px -40px color-mix(in srgb, var(--profile-ink) 62%, transparent);
+  }
+
+  .persona-extra-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @keyframes persona-route-glow {
@@ -1027,54 +1163,6 @@
   margin-top: .38rem;
   color: rgb(255 255 255 / .78);
   font-size: .84375rem;
-}
-
-.itinerary-export-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: .8rem;
-  padding: .72rem .9rem;
-  border-bottom: 1px solid rgb(10 56 80 / .08);
-  background: rgb(255 253 248 / .94);
-}
-
-.itinerary-export-bar > div {
-  display: grid;
-  min-width: 0;
-  gap: .08rem;
-}
-
-.itinerary-export-bar strong {
-  color: #0b4258;
-  font-family: var(--font-rounded-family);
-  font-size: .875rem;
-}
-
-.itinerary-export-bar span {
-  color: #6d8188;
-  font-size: .6875rem;
-}
-
-.itinerary-export-bar button {
-  display: inline-flex;
-  min-height: 2.6rem;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  gap: .35rem;
-  padding: .55rem .85rem;
-  color: white;
-  border-radius: 999px;
-  background: #07899b;
-  box-shadow: 0 10px 22px -16px rgb(7 91 112 / .9);
-  font-size: .75rem;
-  font-weight: 750;
-}
-
-.itinerary-export-bar button:disabled {
-  cursor: wait;
-  opacity: .62;
 }
 
 .itinerary-front-guides {
@@ -1736,5 +1824,315 @@
   .daily-map-content,
   .daily-map-lightbox {
     animation: none !important;
+  }
+}
+
+/* Personality report redesign */
+.persona-editorial-summary {
+  max-width: 22rem;
+  margin: .7rem 0 0;
+  color: color-mix(in srgb, var(--profile-ink) 74%, var(--profile-muted));
+  font-size: .875rem;
+  font-weight: 560;
+  line-height: 1.68;
+}
+
+.persona-radar-layout {
+  display: grid;
+  gap: .9rem;
+}
+
+.persona-radar-notes {
+  display: grid;
+  gap: .65rem;
+}
+
+.persona-note-card {
+  padding: .8rem .88rem;
+  border: 1px solid color-mix(in srgb, var(--profile-line) 24%, transparent);
+  border-radius: .9rem;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .74), transparent 44%),
+    color-mix(in srgb, var(--profile-paper) 94%, white);
+}
+
+.persona-note-card span {
+  display: inline-flex;
+  min-width: 2rem;
+  justify-content: center;
+  padding: .18rem .42rem;
+  color: var(--profile-paper);
+  border-radius: 999px;
+  background: var(--profile-accent);
+  font-size: .7rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.persona-note-card strong {
+  display: block;
+  margin-top: .55rem;
+  color: var(--profile-ink);
+  font-size: .96rem;
+  font-weight: 850;
+}
+
+.persona-note-card p {
+  margin-top: .24rem;
+  color: var(--profile-muted);
+  font-size: .84rem;
+  line-height: 1.6;
+}
+
+.persona-overview-section,
+.persona-moments-section,
+.persona-insights-section,
+.persona-guidance-section,
+.persona-spectrum-section {
+  padding: 1rem 0 0;
+}
+
+.persona-overview {
+  display: grid;
+  gap: .82rem;
+}
+
+.persona-overview-main,
+.persona-overview-side {
+  padding: .95rem;
+  border: 1px solid color-mix(in srgb, var(--profile-line) 24%, transparent);
+  border-radius: 1rem;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .74), transparent 44%),
+    color-mix(in srgb, var(--profile-paper) 94%, white);
+}
+
+.persona-overview-lead {
+  color: var(--profile-ink);
+  font-family: var(--font-editorial);
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.72;
+}
+
+.persona-overview-code {
+  display: grid;
+  gap: .28rem;
+  margin-top: .8rem;
+  padding-top: .75rem;
+  border-top: 1px dashed color-mix(in srgb, var(--profile-line) 62%, transparent);
+}
+
+.persona-overview-code span {
+  color: var(--profile-accent);
+  font-size: .84rem;
+  font-weight: 850;
+  letter-spacing: .12em;
+}
+
+.persona-overview-code strong {
+  color: var(--profile-ink);
+  font-size: .94rem;
+  font-weight: 760;
+  line-height: 1.6;
+}
+
+.persona-keywords-wide {
+  justify-content: flex-start;
+}
+
+.persona-overview-foot {
+  margin-top: .8rem;
+  color: var(--profile-muted);
+  font-size: .86rem;
+  line-height: 1.64;
+}
+
+.persona-moment-list {
+  display: grid;
+  gap: .78rem;
+}
+
+.persona-moment-card {
+  position: relative;
+  padding: .98rem 1rem .92rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--profile-line) 24%, transparent);
+  border-radius: 1rem;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .74), transparent 42%),
+    color-mix(in srgb, var(--profile-paper) 94%, white);
+}
+
+.persona-moment-index {
+  display: inline-flex;
+  min-width: 2.2rem;
+  justify-content: center;
+  padding: .2rem .48rem;
+  color: var(--profile-paper);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--profile-accent) 88%, var(--profile-ink));
+  font-size: .72rem;
+  font-weight: 800;
+}
+
+.persona-moment-card h3 {
+  margin-top: .7rem;
+  color: var(--profile-ink);
+  font-family: var(--font-rounded-family);
+  font-size: 1.08rem;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.persona-moment-card p {
+  margin-top: .34rem;
+  color: var(--profile-muted);
+  font-size: .92rem;
+  line-height: 1.68;
+}
+
+.persona-verdict-card {
+  margin-top: .82rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--profile-line) 24%, transparent);
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--profile-paper) 95%, white);
+}
+
+.persona-verdict-card span {
+  display: inline-block;
+  color: var(--profile-stamp);
+  font-size: .8rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+}
+
+.persona-verdict-card p {
+  margin-top: .5rem;
+  color: var(--profile-ink);
+  font-family: var(--font-editorial);
+  font-size: 1rem;
+  font-weight: 760;
+  line-height: 1.7;
+}
+
+.persona-insight-grid {
+  display: grid;
+  gap: .8rem;
+}
+
+.persona-insight-grid-secondary {
+  margin-top: .8rem;
+}
+
+.persona-insight-card {
+  padding: .95rem;
+  border: 1px solid color-mix(in srgb, var(--profile-line) 24%, transparent);
+  border-radius: 1rem;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .74), transparent 44%),
+    color-mix(in srgb, var(--profile-paper) 94%, white);
+}
+
+.persona-insight-card.is-positive {
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .74), transparent 44%),
+    color-mix(in srgb, var(--profile-paper) 94%, white);
+}
+
+.persona-insight-card.is-neutral {
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / .74), transparent 44%),
+    color-mix(in srgb, var(--profile-paper) 95%, white);
+}
+
+.persona-insight-card.is-accent {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--profile-accent-2) 6%, transparent), transparent 44%),
+    color-mix(in srgb, var(--profile-paper) 94%, white);
+}
+
+.persona-insight-card h3 {
+  color: var(--profile-ink);
+  font-size: .98rem;
+  font-weight: 850;
+}
+
+.persona-insight-list {
+  display: grid;
+  gap: .55rem;
+  margin: .78rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.persona-insight-list li {
+  position: relative;
+  padding-left: .95rem;
+  color: var(--profile-muted);
+  font-size: .9rem;
+  line-height: 1.66;
+}
+
+.persona-insight-list li::before {
+  position: absolute;
+  top: .55rem;
+  left: 0;
+  width: .38rem;
+  height: .38rem;
+  content: "";
+  border-radius: 50%;
+  background: var(--profile-accent);
+}
+
+.persona-scenario-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+  margin-top: .8rem;
+}
+
+.persona-scenario-tags span {
+  padding: .36rem .58rem;
+  color: var(--profile-ink);
+  border: 1px dashed color-mix(in srgb, var(--profile-accent) 24%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--profile-paper) 95%, white);
+  font-size: .82rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.persona-guidance-grid {
+  display: grid;
+  gap: .8rem;
+}
+
+.persona-guidance-grid > .persona-section-heading {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 720px) {
+  .persona-radar-layout {
+    grid-template-columns: minmax(0, 1.02fr) minmax(0, .98fr);
+    align-items: stretch;
+  }
+
+  .persona-overview,
+  .persona-insight-grid,
+  .persona-guidance-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .persona-insight-grid-secondary {
+    grid-template-columns: 1.1fr .9fr;
+  }
+
+  .persona-moment-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .persona-spectrum-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
