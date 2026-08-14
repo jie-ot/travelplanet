@@ -86,15 +86,29 @@ export interface ProfileModule {
   content: string
 }
 
+export interface MusicRecommendation {
+  title: string
+  reason: string
+  mood: string
+}
+
 export interface TravelProfileData {
   archetypeId: string
   archetypeName: string
   personaCode: string
   slogan: string
+  summary?: string | null
   spectrums: ProfileSpectrum[]
   keywords: string[]
   modules: ProfileModule[]
+  strengths?: string[]
+  watchouts?: string[]
+  bestScenarios?: string[]
+  actionTips?: string[]
   nextTripInspiration: string
+  musicRecommendation?: MusicRecommendation | null
+  travelPrescription?: string | null
+  souvenirLine?: string | null
   visualTheme: VisualTheme
 }
 
@@ -164,6 +178,7 @@ export interface PlanningResponse {
   planningModel: PlanningModel
   brief: PlanningBrief | null
   checklist: PlanningChecklistItem[]
+  confirmationToken: string | null
   itinerary: ItineraryData | null
 }
 

@@ -92,15 +92,29 @@ class ProfileModule(CamelModel):
     content: str
 
 
+class MusicRecommendation(CamelModel):
+    title: str
+    reason: str
+    mood: str
+
+
 class TravelProfileData(CamelModel):
     archetype_id: str
     archetype_name: str
     persona_code: str
     slogan: str
+    summary: str | None = None
     spectrums: list[ProfileSpectrum]
     keywords: list[str]
     modules: list[ProfileModule]
+    strengths: list[str] = Field(default_factory=list)
+    watchouts: list[str] = Field(default_factory=list)
+    best_scenarios: list[str] = Field(default_factory=list)
+    action_tips: list[str] = Field(default_factory=list)
     next_trip_inspiration: str
+    music_recommendation: MusicRecommendation | None = None
+    travel_prescription: str | None = None
+    souvenir_line: str | None = None
     visual_theme: VisualTheme
 
 
@@ -252,6 +266,10 @@ class PlanningRequest(CamelModel):
     messages: list[PlanningChatMessage] = Field(default_factory=list)
     brief: PlanningBrief | None = None
     confirmed: bool = False
+    # Stateless digest of the exact normalized brief shown to the user. New
+    # requirement turns receive a new token, so a stale checklist can never
+    # trigger generation after the user has changed the trip requirements.
+    confirmation_token: str | None = Field(default=None, max_length=64)
     # Client-generated, optional. When present the backend publishes stage
     # progress the client can poll while this request is still in flight.
     progress_token: str | None = Field(default=None, max_length=64)
@@ -263,6 +281,7 @@ class PlanningResponse(CamelModel):
     planning_model: PlanningModel
     brief: PlanningBrief | None = None
     checklist: list[PlanningChecklistItem] = Field(default_factory=list)
+    confirmation_token: str | None = None
     itinerary: ItineraryData | None = None
 
 
