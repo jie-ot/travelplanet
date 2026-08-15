@@ -12,7 +12,7 @@ import re
 from typing import Any, Literal
 
 from app.ai.model_selection import PlanningModel, supports_daily_map_planning
-from app.ai.tools import amap_provider
+from app.ai.tools import amap_provider, tool_specs
 from app.core.business_logging import log_event
 from app.models.itinerary import (
     DailyItinerary,
@@ -94,6 +94,103 @@ def enrich_daily_maps(
                 planning_model=planning_model,
             )
     return data
+
+
+_POI_BIND_TOOLS = frozenset(
+    {
+        tool_specs.TOOL_AMAP_POI_SEARCH,
+        tool_specs.TOOL_AMAP_POI_AROUND,
+        tool_specs.TOOL_AMAP_POI_DETAIL,
+    }
+)
+
+
+def bind_verified_poi_locations(
+    data: ItineraryData,
+    facts: dict[str, dict[str, Any]] | None,
+) -> ItineraryData:
+    """Fill missing schedule coordinates from exact-name retained POI facts.
+
+    Does not invent names, overwrite trusted coordinates, or touch reference
+    transport rows. Same-name POIs with conflicting coordinates are skipped.
+    """
+    if not facts:
+        return data
+    index = _exact_poi_coord_index(facts)
+    if not index:
+        return data
+    updated = data.model_copy(deep=True)
+    bound = 0
+    for day in updated.itinerary:
+        for schedule in day.schedules:
+            if schedule.fact_status == "reference":
+                continue
+            if classify_schedule(schedule, fact_for_schedule(schedule, facts)) == "transport":
+                continue
+            if _trusted_coord(schedule):
+                continue
+            place = " ".join((schedule.place_name or "").split())
+            matched = index.get(place)
+            if matched is None:
+                continue
+            fact_id, location = matched
+            schedule.location = location
+            if fact_id not in schedule.fact_refs:
+                schedule.fact_refs = [*schedule.fact_refs, fact_id]
+            schedule.fact_status = "verified"
+            bound += 1
+    if bound:
+        log_event(
+            "planning_poi_location_bound",
+            status="success",
+            bound_count=bound,
+        )
+    return updated
+
+
+def _exact_poi_coord_index(
+    facts: dict[str, dict[str, Any]],
+) -> dict[str, tuple[str, str]]:
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for fact_id, fact in facts.items():
+        if str(fact.get("tool") or "") not in _POI_BIND_TOOLS:
+            continue
+        status = str(fact.get("status") or "").lower()
+        context = fact.get("result_context")
+        context_status = (
+            str(context.get("status") or "").lower()
+            if isinstance(context, dict)
+            else ""
+        )
+        if status != "ok" and context_status != "ok":
+            continue
+        name = " ".join(str(fact.get("name") or "").split())
+        location = _fact_map_coord(fact)
+        if not name or not location:
+            continue
+        grouped.setdefault(name, []).append((fact_id, location))
+    index: dict[str, tuple[str, str]] = {}
+    for name, items in grouped.items():
+        coords = {coord for _, coord in items}
+        if len(coords) != 1:
+            continue
+        index[name] = items[0]
+    return index
+
+
+def _fact_map_coord(fact: dict[str, Any]) -> str | None:
+    raw = str(fact.get("location") or "").strip()
+    if not raw or not amap_provider.looks_like_coord(raw):
+        return None
+    location = amap_provider.normalize_coord(raw)
+    try:
+        lng_text, lat_text = location.split(",", 1)
+        lng, lat = float(lng_text), float(lat_text)
+    except (TypeError, ValueError):
+        return None
+    if not (73 <= lng <= 136 and 3 <= lat <= 54):
+        return None
+    return location
 
 
 def _candidate_groups(

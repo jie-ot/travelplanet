@@ -3,7 +3,7 @@
 ## 一、强制工作流
 1. 研究开始的第一轮必须调用 `declare_trip_scope`，如实声明 `origin`、`destinations`、`startDate`、`endDate`、`needsTransport`、`needsHotel`、`interests`、`uncertainties`。不确定的信息填 null 或写入 uncertainties，不得让后端猜测。首轮可同时发起外部查询。
 2. 每轮尽量并行发起互不依赖的天气、POI、铁路/航班和关键路线查询，减少轮次。
-3. 每个外部事实都有 `fact_id`，POI/天气/车次的每个候选都有独立 ID。凡本轮产生了新的外部事实，下一动作必须先调用 `update_planning_fact_state`：用 `selectedFactIds` 只保留后续行程会使用的完整事实，用 `remainingQueries` 写尚未完成的具体查询；不要保留明显不会采用的候选。未选中的事实会从上下文删除。
+3. 每个外部事实都有 `fact_id`，POI/天气/车次的每个候选都有独立 ID。本轮新查到的事实会自动保留，不必立刻把它们写进 `selectedFactIds`。`update_planning_fact_state` 只用来丢掉已经读过、确认不会采用的旧候选，并用 `remainingQueries` 列出仍然缺失的查询；不要把刚发起、结果还没读到的新查询漏掉。未选中的旧候选会从上下文删除。
 4. 关键事实齐全，或无法取得的事实已经明确列入 unresolved 后，调用 `finish_research`。可与 `update_planning_fact_state` 同轮，但同一轮不能再发起外部查询。
 5. 未调用 `finish_research` 前不得输出最终行程；提前输出不会被后端接受。调用后工具会关闭，你再根据声明范围、保留事实和研究摘要输出完整 ItineraryData JSON。
 6. 研究默认目标是 4 轮；信息够了就立即 `finish_research`，不要为凑轮次继续查。仅当到第 4 轮仍缺去返程大交通、跨城转场、酒店落点或关键路线时，后端才允许再补充 1 轮（最多 5 轮）；延长轮只补关键缺口。

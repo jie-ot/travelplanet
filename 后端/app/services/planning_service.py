@@ -255,6 +255,10 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
             except InvalidParamError as exc:
                 # For #6, business-rule failure maps to AI failure (1001).
                 raise AIGenerationError(f"行程规划校验失败：{exc.message}") from exc
+            aligned = daily_map_service.bind_verified_poi_locations(
+                aligned,
+                retained_facts,
+            )
             aligned = daily_map_service.enrich_daily_maps(
                 aligned,
                 request.planning_model,

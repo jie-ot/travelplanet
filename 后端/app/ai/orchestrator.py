@@ -24,7 +24,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from app.ai import output_parser, planning_feasibility
+from app.ai import output_parser, planning_feasibility, planning_research_state
 from app.ai.clients import vivo_chat_client, vivo_image_client
 from app.ai.clients.vivo_image_client import ImageGenerationResult
 from app.ai.memory import context_builder
@@ -1555,6 +1555,7 @@ def _plan_with_tools(
         called_names: list[str] = []
         turn_issued_fact_count = 0
         fact_state_updated = False
+        fact_ids_at_turn_start = set(fact_registry)
         for call_index, (tc, args) in enumerate(parsed_calls, start=1):
             called_names.append(tc.name)
             tool_kind = _planning_tool_kind(tc.name, allowed_external_tool_names)
@@ -1646,6 +1647,11 @@ def _plan_with_tools(
                             "message": "本轮仍有外部查询；请读取结果后下一轮再结束研究",
                         }
                     else:
+                        remaining_queries = planning_research_state.refine_remaining_queries(
+                            remaining_queries,
+                            fact_registry=fact_registry,
+                            **_research_coverage_kwargs(scope, fact_registry),
+                        )
                         finish_gaps = _critical_research_gaps(
                             scope=scope,
                             remaining_queries=remaining_queries,
@@ -1742,6 +1748,27 @@ def _plan_with_tools(
                 }
             )
 
+        retained_facts, auto_retained_ids = planning_research_state.merge_new_turn_facts(
+            retained_facts,
+            fact_registry,
+            fact_ids_at_turn_start,
+        )
+        if auto_retained_ids:
+            log_event(
+                "planning_facts_auto_retained",
+                status="success",
+                added_count=len(auto_retained_ids),
+                added_fact_ids=auto_retained_ids[:40],
+                retained_fact_count=len(retained_facts),
+                same_turn_prune=fact_state_updated,
+                planning_model=planning_model,
+            )
+        remaining_queries = planning_research_state.refine_remaining_queries(
+            remaining_queries,
+            fact_registry=fact_registry,
+            **_research_coverage_kwargs(scope, fact_registry),
+        )
+
         if research_summary is not None:
             break
         completed_rounds = round_idx + 1
@@ -1787,6 +1814,11 @@ def _plan_with_tools(
                     else "target_rounds_complete"
                 )
         remaining_rounds = active_round_limit - round_idx - 1
+        auto_note = (
+            f"本轮新产生的 {len(auto_retained_ids)} 条事实已自动保留。"
+            if auto_retained_ids
+            else ""
+        )
         if turn_issued_fact_count > 0 and not fact_state_updated:
             messages.append(
                 {
@@ -1794,9 +1826,10 @@ def _plan_with_tools(
                     "content": (
                         f"本轮已调用：{', '.join(called_names)}，"
                         f"新产生 {turn_issued_fact_count} 条事实。"
-                        "请立即调用 update_planning_fact_state，"
-                        "用 selectedFactIds 只保留后续行程会用到的事实，"
-                        "不要保留明显不会采用的候选；未选中的结果会从上下文删除。"
+                        f"{auto_note}"
+                        "只需在确认不会采用某些旧候选时才调用 update_planning_fact_state；"
+                        "不要丢掉刚查到、还没来得及写入 selectedFactIds 的新事实。"
+                        "remainingQueries 只保留仍然缺失的查询。"
                         "信息已够时可在同一轮再调用 finish_research；"
                         f"否则继续并行补查。还剩 {remaining_rounds} 个研究轮次，"
                         f"已执行 {external_calls} 次外部调用。"
@@ -1810,11 +1843,12 @@ def _plan_with_tools(
                     "role": "user",
                     "content": (
                         f"本轮已调用：{', '.join(called_names)}。"
+                        f"{auto_note}"
                         f"还剩 {remaining_rounds} 个研究轮次，已执行 {external_calls} 次外部调用。"
                         "互不依赖的查询尽量同轮并行；"
-                        "读完新事实后用 update_planning_fact_state 只保留会用到的，"
-                        "丢弃不会采用的候选。关键事实齐全就调用 finish_research，"
-                        "不要为凑满轮次继续查询。"
+                        "只把明显不会采用的旧候选从 selectedFactIds 去掉。"
+                        "remainingQueries 只写仍缺的查询。"
+                        "关键事实齐全就调用 finish_research，不要为凑满轮次继续查询。"
                     ),
                 }
             )
@@ -1852,6 +1886,26 @@ def _plan_with_tools(
         fact_count=len(fact_registry) or None,
         detail=f"已取得 {len(fact_registry)} 条工具事实",
     )
+    remaining_queries = planning_research_state.refine_remaining_queries(
+        remaining_queries,
+        fact_registry=fact_registry,
+        **_research_coverage_kwargs(scope, fact_registry),
+    )
+    if research_summary is not None:
+        research_summary["unresolved"] = remaining_queries
+    retained_facts, backfilled_ids = planning_research_state.union_unrepresented_query_facts(
+        retained_facts,
+        fact_registry,
+    )
+    if backfilled_ids:
+        log_event(
+            "planning_facts_query_backfill",
+            status="success",
+            added_count=len(backfilled_ids),
+            added_fact_ids=backfilled_ids[:40],
+            retained_fact_count=len(retained_facts),
+            planning_model=planning_model,
+        )
     retained_facts = _select_planning_facts_for_final(
         retained_facts or fact_registry
     )
@@ -2172,6 +2226,65 @@ def collect_planning_requirements(
         return parsed
 
 
+def _research_coverage_kwargs(
+    scope: dict[str, Any] | None,
+    fact_registry: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    destinations = (scope or {}).get("destinations")
+    destination_list = (
+        [str(item) for item in destinations if str(item).strip()]
+        if isinstance(destinations, list)
+        else []
+    )
+    tool_names = {
+        str(fact.get("tool") or "")
+        for fact in fact_registry.values()
+        if _tool_result_has_usable_fact(fact)
+    }
+    transport_tools = {
+        tool_specs.TOOL_QUERY_RAIL,
+        tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+    }
+    transport_query_keys = {
+        _planning_tool_cache_key(
+            str(fact.get("tool") or ""),
+            fact.get("arguments") if isinstance(fact.get("arguments"), dict) else {},
+        )
+        for fact in fact_registry.values()
+        if str(fact.get("tool") or "") in transport_tools
+        and _tool_result_has_usable_fact(fact)
+    }
+    if destination_list:
+        has_hotel = all(
+            _has_hotel_fact_for_city(city, fact_registry) for city in destination_list
+        )
+    else:
+        has_hotel = _has_hotel_fact_for_city("", fact_registry)
+    flight_tools = {
+        tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
+        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+    }
+    return {
+        "transport_query_count": len(transport_query_keys),
+        "destination_count": len(destination_list),
+        "has_flight": bool(tool_names & flight_tools),
+        "has_rail": tool_specs.TOOL_QUERY_RAIL in tool_names,
+        "has_route": tool_specs.TOOL_AMAP_ROUTE in tool_names,
+        "has_poi_around": tool_specs.TOOL_AMAP_POI_AROUND in tool_names,
+        "has_poi_search": bool(
+            tool_names
+            & {
+                tool_specs.TOOL_AMAP_POI_SEARCH,
+                tool_specs.TOOL_AMAP_POI_DETAIL,
+            }
+        ),
+        "has_hotel": has_hotel,
+    }
+
+
 def _critical_research_gaps(
     *,
     scope: dict[str, Any] | None,
@@ -2269,10 +2382,16 @@ def _critical_research_gaps(
         "关键路线",
         "接驳",
     )
+    coverage = _research_coverage_kwargs(scope, fact_registry)
     critical_remaining = [
         query
         for query in remaining_queries
         if any(marker in query.lower() for marker in critical_markers)
+        and not planning_research_state.remaining_query_is_covered(
+            query,
+            fact_registry=fact_registry,
+            **coverage,
+        )
     ]
     if critical_remaining:
         gaps.append("模型标记仍待查：" + "；".join(critical_remaining[:4]))
