@@ -1047,7 +1047,7 @@
 
 @media (min-width: 720px) {
   .persona-export-sheet {
-    max-width: 34rem;
+    max-width: 42rem;
     min-height: auto;
     margin: 0 auto;
     box-shadow: 0 24px 70px -40px color-mix(in srgb, var(--profile-ink) 62%, transparent);
@@ -2162,25 +2162,26 @@
 
 @media (min-width: 720px) {
   .persona-radar-layout {
-    grid-template-columns: minmax(0, 1.02fr) minmax(0, .98fr);
+    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+    gap: 1rem;
   }
 
   .persona-overview,
   .persona-insight-grid,
   .persona-guidance-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .persona-insight-grid-secondary {
-    grid-template-columns: 1.1fr .9fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .persona-moment-list {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .persona-spectrum-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -544,7 +544,7 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end bg-foreground/34 backdrop-blur-md animate-in fade-in"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/34 backdrop-blur-md animate-in fade-in"
       onClick={() => {
         if (pendingDelete) return
         onClose()
@@ -554,7 +554,7 @@ export function TravelMemoryDrawer({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="travel-memory-title"
-        className="max-h-[88vh] w-full overflow-hidden rounded-t-[1.75rem] border border-white/60 bg-[#f4faff]/98 shadow-[0_-28px_80px_-34px_rgba(6,45,72,0.7)] ring-1 ring-[#0a3850]/10 backdrop-blur-xl"
+        className="max-h-[88vh] w-full max-w-md overflow-hidden rounded-t-[1.75rem] border border-white/60 bg-[#f4faff]/98 shadow-[0_-28px_80px_-34px_rgba(6,45,72,0.7)] ring-1 ring-[#0a3850]/10 backdrop-blur-xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="mx-auto mt-2 h-1.5 w-12 rounded-full bg-[#0a3850]/16" />
